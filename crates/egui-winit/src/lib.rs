@@ -542,6 +542,14 @@ impl State {
                     consumed: self.egui_ctx.egui_wants_pointer_input(),
                 }
             }
+            _ => {
+                // ToDo: Add warning logging when receive unknown WindowEvents.
+                EventResponse {
+                    // We probably want to repaint by any unknown event.
+                    repaint: true,
+                    consumed: false,
+                }
+            }
         }
     }
 
@@ -2139,5 +2147,6 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::ThemeChanged { .. } => "WindowEvent::ThemeChanged",
         WindowEvent::Occluded { .. } => "WindowEvent::Occluded",
         WindowEvent::PanGesture { .. } => "WindowEvent::PanGesture",
+        _ => "Unknown WindowEvent",
     }
 }

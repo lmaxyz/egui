@@ -55,7 +55,7 @@ wayland = ["winit/wayland", "bytemuck"]
 x11 = ["winit/x11", "bytemuck"]
 
 [dependencies]
-egui = { workspace = true, default-features = false }
+egui = { version="0.34.2", default-features = false }
 
 log.workspace = true
 profiling.workspace = true
