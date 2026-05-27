@@ -76,7 +76,7 @@ impl eframe::App for Application {
             ));
         }
 
-        CentralPanel::default().show(ui, |ui| {
+        CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label("Attention type:");

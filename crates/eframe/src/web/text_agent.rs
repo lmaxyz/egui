@@ -56,13 +56,8 @@ impl TextAgent {
             let input = input.clone();
             move |event: web_sys::InputEvent, runner: &mut AppRunner| {
                 let text = input.value();
-                // Workaround for an Android Gboard issue: after typing a word,
-                // the user has to delete invisible characters (whose count
-                // matches the length of the current suggestion) before actual
-                // characters are deleted, unless the focus has been reset.
-                //
-                // this issue appears to have been fixed in Gboard sometime
-                // between versions 14.7.09 and 17.0.12.
+                // Fix android virtual keyboard Gboard
+                // This removes the virtual keyboard's suggestion.
                 if !event.is_composing() {
                     input.blur().ok();
                     input.focus().ok();
@@ -80,7 +75,11 @@ impl TextAgent {
         };
 
         let on_composition_start = {
+            let input = input.clone();
             move |_: web_sys::CompositionEvent, runner: &mut AppRunner| {
+                input.set_value("");
+                let event = egui::Event::Ime(egui::ImeEvent::Enabled);
+                runner.input.raw.events.push(event);
                 // Repaint moves the text agent into place,
                 // see `move_to` in `AppRunner::handle_platform_output`.
                 runner.needs_repaint.repaint_asap();
@@ -136,12 +135,6 @@ impl TextAgent {
         self.prev_ime_output.set(ime);
 
         let Some(ime) = ime else { return Ok(()) };
-
-        if ime.should_interrupt_composition {
-            // no-op for now: currently, the text agent is sizeless, so any
-            // click shifts focus to the canvas, which naturally interrupts the
-            // composition.
-        }
 
         let mut canvas_rect = super::canvas_content_rect(canvas);
         // Fix for safari with virtual keyboard flapping position

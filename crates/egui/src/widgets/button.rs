@@ -4,7 +4,7 @@ use crate::{
     Atom, AtomExt as _, AtomKind, AtomLayout, AtomLayoutResponse, Color32, CornerRadius, Frame,
     Image, IntoAtoms, NumExt as _, Response, Sense, Stroke, TextStyle, TextWrapMode, Ui, Vec2,
     Widget, WidgetInfo, WidgetText, WidgetType,
-    widget_style::{ButtonStyle, Classes, HasClasses, SELECTED_CLASS, WidgetState},
+    widget_style::{ButtonStyle, WidgetState},
 };
 
 /// Clickable button with text.
@@ -38,7 +38,6 @@ pub struct Button<'a> {
     selected: bool,
     image_tint_follows_text_color: bool,
     limit_image_size: bool,
-    classes: Classes,
 }
 
 impl<'a> Button<'a> {
@@ -57,7 +56,6 @@ impl<'a> Button<'a> {
             selected: false,
             image_tint_follows_text_color: false,
             limit_image_size: false,
-            classes: Classes::default(),
         }
     }
 
@@ -202,6 +200,12 @@ impl<'a> Button<'a> {
         self
     }
 
+    #[inline]
+    #[deprecated = "Renamed to `corner_radius`"]
+    pub fn rounding(self, corner_radius: impl Into<CornerRadius>) -> Self {
+        self.corner_radius(corner_radius)
+    }
+
     /// If true, the tint of the image is multiplied by the widget text color.
     ///
     /// This makes sense for images that are white, that should have the same color as the text color.
@@ -288,7 +292,6 @@ impl<'a> Button<'a> {
             selected,
             image_tint_follows_text_color,
             limit_image_size,
-            mut classes,
         } = self;
 
         // Min size height always equal or greater than interact size if not small
@@ -314,9 +317,7 @@ impl<'a> Button<'a> {
         let response: Option<Response> = ui.ctx().read_response(id);
         let state = response.map(|r| r.widget_state()).unwrap_or_default();
 
-        classes.add_class_if(SELECTED_CLASS, selected);
-
-        let ButtonStyle { frame, text_style } = ui.style().button_style(&classes, state);
+        let ButtonStyle { frame, text_style } = ui.style().button_style(state, selected);
 
         let mut button_padding = if has_frame_margin {
             frame.inner_margin
@@ -391,15 +392,5 @@ impl<'a> Button<'a> {
 impl Widget for Button<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         self.atom_ui(ui).response
-    }
-}
-
-impl HasClasses for Button<'_> {
-    fn classes(&self) -> &Classes {
-        &self.classes
-    }
-
-    fn classes_mut(&mut self) -> &mut Classes {
-        &mut self.classes
     }
 }

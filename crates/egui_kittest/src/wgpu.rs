@@ -58,10 +58,7 @@ pub fn default_wgpu_setup() -> egui_wgpu::WgpuSetup {
     egui_wgpu::WgpuSetup::CreateNew(setup)
 }
 
-pub fn create_render_state(
-    setup: WgpuSetup,
-    options: egui_wgpu::RendererOptions,
-) -> egui_wgpu::RenderState {
+pub fn create_render_state(setup: WgpuSetup) -> egui_wgpu::RenderState {
     // No display handle needed for headless testing — we don't present to a window.
     let instance = pollster::block_on(setup.new_instance());
 
@@ -72,7 +69,7 @@ pub fn create_render_state(
         },
         &instance,
         None,
-        options,
+        egui_wgpu::RendererOptions::PREDICTABLE,
     ))
     .expect("Failed to create render state")
 }
@@ -92,17 +89,14 @@ impl WgpuTestRenderer {
     /// Create a new [`WgpuTestRenderer`] with the default setup.
     pub fn new() -> Self {
         Self {
-            render_state: create_render_state(
-                default_wgpu_setup(),
-                egui_wgpu::RendererOptions::PREDICTABLE,
-            ),
+            render_state: create_render_state(default_wgpu_setup()),
         }
     }
 
     /// Create a new [`WgpuTestRenderer`] with the given setup.
     pub fn from_setup(setup: WgpuSetup) -> Self {
         Self {
-            render_state: create_render_state(setup, egui_wgpu::RendererOptions::PREDICTABLE),
+            render_state: create_render_state(setup),
         }
     }
 
@@ -120,13 +114,6 @@ impl WgpuTestRenderer {
             "The RenderState passed in has been used before, pass in a fresh RenderState instead."
         );
         Self { render_state }
-    }
-
-    /// Create a new [`WgpuTestRenderer`] with custom render options.
-    pub fn with_render_options(options: egui_wgpu::RendererOptions) -> Self {
-        Self {
-            render_state: create_render_state(default_wgpu_setup(), options),
-        }
     }
 }
 
@@ -222,7 +209,7 @@ impl crate::TestRenderer for WgpuTestRenderer {
 
         self.render_state
             .queue
-            .submit(std::iter::chain(user_buffers, once(encoder.finish())));
+            .submit(user_buffers.into_iter().chain(once(encoder.finish())));
 
         self.render_state
             .device

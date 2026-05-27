@@ -49,15 +49,10 @@ fn pos_in_galley(galley: &Galley, ccursor: CCursor) -> Pos2 {
 
 impl std::fmt::Debug for WidgetTextCursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            widget_id,
-            ccursor,
-            pos: _,
-        } = self;
         f.debug_struct("WidgetTextCursor")
-            .field("widget_id", &widget_id.short_debug_format())
-            .field("ccursor", &ccursor.index)
-            .finish_non_exhaustive()
+            .field("widget_id", &self.widget_id.short_debug_format())
+            .field("ccursor", &self.ccursor.index)
+            .finish()
     }
 }
 

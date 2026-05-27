@@ -1,6 +1,3 @@
-#![cfg(feature = "snapshot")]
-#![cfg(feature = "wgpu")]
-
 use egui::{Modifiers, ScrollArea, Vec2, include_image};
 use egui_kittest::{Harness, SnapshotResults};
 use kittest::Queryable as _;
@@ -125,7 +122,6 @@ fn test_scroll_harness() -> Harness<'static, bool> {
         )
 }
 
-#[cfg(feature = "snapshot")]
 #[test]
 fn test_scroll_to_me() {
     let mut harness = test_scroll_harness();

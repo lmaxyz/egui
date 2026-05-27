@@ -1,7 +1,4 @@
-use crate::{
-    Response, Sense, Ui, Vec2, Widget, vec2,
-    widget_style::{Classes, HasClasses, SeparatorStyle},
-};
+use crate::{Response, Sense, Ui, Vec2, Widget, vec2, widget_style::SeparatorStyle};
 
 /// A visual separator. A horizontal or vertical line (depending on [`crate::Layout`]).
 ///
@@ -19,7 +16,6 @@ pub struct Separator {
     spacing: Option<f32>,
     grow: f32,
     is_horizontal_line: Option<bool>,
-    classes: Classes,
 }
 
 impl Default for Separator {
@@ -28,7 +24,6 @@ impl Default for Separator {
             spacing: None,
             grow: 0.0,
             is_horizontal_line: None,
-            classes: Classes::default(),
         }
     }
 }
@@ -96,7 +91,6 @@ impl Widget for Separator {
             spacing,
             grow,
             is_horizontal_line,
-            classes,
         } = self;
 
         // Get the widget style by reading the response from the previous pass
@@ -106,7 +100,7 @@ impl Widget for Separator {
         let SeparatorStyle {
             spacing: spacing_style,
             stroke,
-        } = ui.style().separator_style(&classes, state);
+        } = ui.style().separator_style(state);
 
         // override the spacing if not set
         let spacing = spacing.unwrap_or(spacing_style);
@@ -146,15 +140,5 @@ impl Widget for Separator {
         }
 
         response
-    }
-}
-
-impl HasClasses for Separator {
-    fn classes(&self) -> &Classes {
-        &self.classes
-    }
-
-    fn classes_mut(&mut self) -> &mut Classes {
-        &mut self.classes
     }
 }

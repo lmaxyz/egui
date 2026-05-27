@@ -1,5 +1,3 @@
-use std::fmt::Write as _;
-
 #[derive(Clone)]
 struct Frame {
     /// `_main` is usually as the deepest depth.
@@ -25,7 +23,7 @@ pub fn capture() -> String {
             if let Some(file_and_line) = &mut file_and_line
                 && let Some(line_nr) = symbol.lineno()
             {
-                write!(file_and_line, ":{line_nr}").ok();
+                file_and_line.push_str(&format!(":{line_nr}"));
             }
             let file_and_line = file_and_line.unwrap_or_default();
 
@@ -132,14 +130,12 @@ pub fn capture() -> String {
 
             if frame.depth + 1 < last_depth || last_depth + 1 < frame.depth {
                 // Show that some frames were elided
-                writeln!(formatted, "{:widest_depth$}  …", "").ok();
+                formatted.push_str(&format!("{:widest_depth$}  …\n", ""));
             }
 
-            writeln!(
-                formatted,
-                "{depth:widest_depth$}: {file_and_line:widest_file_line$}  {name}"
-            )
-            .ok();
+            formatted.push_str(&format!(
+                "{depth:widest_depth$}: {file_and_line:widest_file_line$}  {name}\n"
+            ));
 
             last_depth = frame.depth;
         }

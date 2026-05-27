@@ -2,7 +2,7 @@
 
 use web_time::Instant;
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use winit::event_loop::ActiveEventLoop;
 
 use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
@@ -171,7 +171,7 @@ impl EpiIntegration {
     #[allow(clippy::allow_attributes, clippy::too_many_arguments)]
     pub fn new(
         egui_ctx: egui::Context,
-        window: &Arc<winit::window::Window>,
+        window: &winit::window::Window,
         app_name: &str,
         native_options: &crate::NativeOptions,
         storage: Option<Box<dyn epi::Storage>>,
@@ -192,7 +192,6 @@ impl EpiIntegration {
             glow_register_native_texture,
             #[cfg(feature = "wgpu_no_default_features")]
             wgpu_render_state,
-            window: Some(Arc::clone(window)),
             raw_display_handle: window.display_handle().map(|h| h.as_raw()),
             raw_window_handle: window.window_handle().map(|h| h.as_raw()),
         };
@@ -215,17 +214,15 @@ impl EpiIntegration {
         Self {
             frame,
             last_auto_save: Instant::now(),
+            egui_ctx,
             pending_full_output: Default::default(),
             close: false,
             can_drag_window: false,
             #[cfg(feature = "persistence")]
             persist_window: native_options.persist_window,
             app_icon_setter,
-            beginning: Instant::now()
-                .checked_sub(web_time::Duration::from_secs_f64(egui_ctx.time()))
-                .unwrap_or_else(Instant::now),
+            beginning: Instant::now(),
             is_first_frame: true,
-            egui_ctx,
         }
     }
 
@@ -262,7 +259,7 @@ impl EpiIntegration {
 
     /// Run user code - this can create immediate viewports, so hold no locks over this!
     ///
-    /// If `viewport_ui_cb` is None, we are in the root viewport and will call [`crate::App::ui`].
+    /// If `viewport_ui_cb` is None, we are in the root viewport and will call [`crate::App::update`].
     pub fn update(
         &mut self,
         app: &mut dyn epi::App,
@@ -290,6 +287,12 @@ impl EpiIntegration {
                 }
 
                 if is_visible {
+                    {
+                        profiling::scope!("App::update");
+                        #[expect(deprecated)]
+                        app.update(ui.ctx(), &mut self.frame);
+                    }
+
                     {
                         profiling::scope!("App::ui");
                         app.ui(ui, &mut self.frame);

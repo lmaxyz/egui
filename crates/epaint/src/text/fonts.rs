@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -11,7 +11,7 @@ use crate::{
     TextureAtlas,
     text::{
         Galley, LayoutJob, LayoutSection, TextOptions, VariationCoords,
-        font::{Font, FontFace},
+        font::{Font, FontFace, GlyphInfo},
     },
 };
 use emath::{NumExt as _, OrderedFloat};
@@ -188,29 +188,11 @@ pub struct FontTweak {
 
     /// Override the global font hinting setting for this specific font.
     ///
-    /// `None` means use the global setting in [`TextOptions::font_hinting`].
-    pub hinting: Option<bool>,
-
-    /// Override the global sub-pixel binning setting for this specific font.
-    ///
-    /// `None` means use the global setting in [`TextOptions::subpixel_binning`].
-    pub subpixel_binning: Option<bool>,
+    /// `None` means use the global setting.
+    pub hinting_override: Option<bool>,
 
     /// Override the font's default variation coordinates.
     pub coords: VariationCoords,
-
-    /// Width of a thin space (`\u{2009}`) and narrow no-break space (`\u{202F}`),
-    /// as a fraction of the normal space width.
-    ///
-    /// Thin space is often used as a thousands separator: `1 234 567`.
-    ///
-    /// Default: `0.5` (half a normal space).
-    pub thin_space_width: f32,
-
-    /// Width of a tab character (`\t`), measured in number of space widths.
-    ///
-    /// Default: `4.0`.
-    pub tab_size: f32,
 }
 
 impl Default for FontTweak {
@@ -219,11 +201,8 @@ impl Default for FontTweak {
             scale: 1.0,
             y_offset_factor: 0.0,
             y_offset: 0.0,
-            hinting: None,
-            subpixel_binning: None,
+            hinting_override: None,
             coords: VariationCoords::default(),
-            thin_space_width: 0.5,
-            tab_size: 4.0,
         }
     }
 }
@@ -439,7 +418,7 @@ impl FontFaceKey {
     pub const INVALID: Self = Self(0);
 
     fn new() -> Self {
-        static KEY_COUNTER: AtomicUsize = AtomicUsize::new(1);
+        static KEY_COUNTER: AtomicU64 = AtomicU64::new(1);
         Self(crate::util::hash(
             KEY_COUNTER.fetch_add(1, Ordering::Relaxed),
         ))
@@ -457,20 +436,9 @@ pub(super) struct CachedFamily {
     /// Lazily calculated.
     pub characters: Option<BTreeMap<char, Vec<String>>>,
 
-    /// The face used when no face in [`Self::fonts`] supports a char.
-    pub replacement_face_key: FontFaceKey,
+    pub replacement_glyph: (FontFaceKey, GlyphInfo),
 
-    /// The char that [`Self::replacement_face_key`] actually contains.
-    ///
-    /// When the user asks about a char that no fallback face supports we
-    /// render this char in its place.
-    pub replacement_char: char,
-
-    /// Cache: `char → which face in the fallback chain owns this char`.
-    ///
-    /// Location-independent (fallback choice depends only on charmap support,
-    /// not on variation coordinates).
-    pub face_cache: ahash::HashMap<char, FontFaceKey>,
+    pub glyph_info_cache: ahash::HashMap<char, (FontFaceKey, GlyphInfo)>,
 }
 
 impl CachedFamily {
@@ -478,59 +446,49 @@ impl CachedFamily {
         fonts: Vec<FontFaceKey>,
         fonts_by_id: &mut nohash_hasher::IntMap<FontFaceKey, FontFace>,
     ) -> Self {
-        const PRIMARY_REPLACEMENT_CHAR: char = '◻'; // white medium square
-        const FALLBACK_REPLACEMENT_CHAR: char = '?'; // fallback for the fallback
-
         if fonts.is_empty() {
             return Self {
                 fonts,
                 characters: None,
-                replacement_face_key: FontFaceKey::INVALID,
-                replacement_char: PRIMARY_REPLACEMENT_CHAR,
-                face_cache: Default::default(),
+                replacement_glyph: (FontFaceKey::INVALID, GlyphInfo::INVISIBLE),
+                glyph_info_cache: Default::default(),
             };
         }
 
         let mut slf = Self {
             fonts,
             characters: None,
-            replacement_face_key: FontFaceKey::INVALID,
-            replacement_char: PRIMARY_REPLACEMENT_CHAR,
-            face_cache: Default::default(),
+            replacement_glyph: (FontFaceKey::INVALID, GlyphInfo::INVISIBLE),
+            glyph_info_cache: Default::default(),
         };
 
-        let (replacement_face_key, replacement_char) = slf
-            .find_face_for_char(PRIMARY_REPLACEMENT_CHAR, fonts_by_id)
-            .map(|key| (key, PRIMARY_REPLACEMENT_CHAR))
-            .or_else(|| {
-                slf.find_face_for_char(FALLBACK_REPLACEMENT_CHAR, fonts_by_id)
-                    .map(|key| (key, FALLBACK_REPLACEMENT_CHAR))
-            })
+        const PRIMARY_REPLACEMENT_CHAR: char = '◻'; // white medium square
+        const FALLBACK_REPLACEMENT_CHAR: char = '?'; // fallback for the fallback
+
+        let replacement_glyph = slf
+            .glyph_info_no_cache_or_fallback(PRIMARY_REPLACEMENT_CHAR, fonts_by_id)
+            .or_else(|| slf.glyph_info_no_cache_or_fallback(FALLBACK_REPLACEMENT_CHAR, fonts_by_id))
             .unwrap_or_else(|| {
                 log::warn!(
                     "Failed to find replacement characters {PRIMARY_REPLACEMENT_CHAR:?} or {FALLBACK_REPLACEMENT_CHAR:?}. Will use empty glyph."
                 );
-                (FontFaceKey::INVALID, PRIMARY_REPLACEMENT_CHAR)
+                (FontFaceKey::INVALID, GlyphInfo::INVISIBLE)
             });
-        slf.replacement_face_key = replacement_face_key;
-        slf.replacement_char = replacement_char;
+        slf.replacement_glyph = replacement_glyph;
 
         slf
     }
 
-    /// Walk the fallback chain and return the first face whose charmap supports `c`.
-    ///
-    /// Pure — does not touch any cache. Callers that want memoisation should
-    /// insert into [`Self::face_cache`] themselves.
-    pub(crate) fn find_face_for_char(
-        &self,
+    pub(crate) fn glyph_info_no_cache_or_fallback(
+        &mut self,
         c: char,
         fonts_by_id: &mut nohash_hasher::IntMap<FontFaceKey, FontFace>,
-    ) -> Option<FontFaceKey> {
+    ) -> Option<(FontFaceKey, GlyphInfo)> {
         for font_key in &self.fonts {
             let font_face = fonts_by_id.get_mut(font_key).expect("Nonexistent font ID");
-            if font_face.glyph_id_resolution(c).is_some() {
-                return Some(*font_key);
+            if let Some(glyph_info) = font_face.glyph_info(c) {
+                self.glyph_info_cache.insert(c, (*font_key, glyph_info));
+                return Some((*font_key, glyph_info));
             }
         }
         None
@@ -807,9 +765,6 @@ pub struct FontsImpl {
     fonts_by_id: nohash_hasher::IntMap<FontFaceKey, FontFace>,
     fonts_by_name: ahash::HashMap<String, FontFaceKey>,
     family_cache: ahash::HashMap<FontFamily, CachedFamily>,
-
-    /// Recycled `harfrust` shaping buffer to avoid per-layout allocations.
-    shape_buffer: Option<harfrust::UnicodeBuffer>,
 }
 
 impl FontsImpl {
@@ -843,22 +798,11 @@ impl FontsImpl {
             fonts_by_id,
             fonts_by_name,
             family_cache: Default::default(),
-            shape_buffer: Some(harfrust::UnicodeBuffer::new()),
         }
     }
 
     pub fn options(&self) -> &TextOptions {
         self.atlas.options()
-    }
-
-    /// Take the recycled shaping buffer (or create a new one if already taken).
-    pub fn take_shape_buffer(&mut self) -> harfrust::UnicodeBuffer {
-        self.shape_buffer.take().unwrap_or_default()
-    }
-
-    /// Return a shaping buffer for reuse.
-    pub fn return_shape_buffer(&mut self, buffer: harfrust::UnicodeBuffer) {
-        self.shape_buffer = Some(buffer);
     }
 
     /// Get the right font implementation from [`FontFamily`].
@@ -1056,7 +1000,6 @@ impl GalleyCache {
                     0.0
                 },
                 round_output_to_gui: job.round_output_to_gui,
-                keep_trailing_whitespace: job.keep_trailing_whitespace,
             };
 
             // Add overlapping sections:

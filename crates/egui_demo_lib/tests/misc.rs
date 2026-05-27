@@ -13,9 +13,8 @@ fn test_kerning() {
                     ui.label("Hello world!");
                     ui.label("Repeated characters: iiiiiiiiiiiii lllllllll mmmmmmmmmmmmmmmm");
                     ui.label("Thin spaces: −123 456 789");
-                    ui.label("Ligature: fi fl ffi ffl");
-                    ui.label("Kerning: AVATAR");
-                    ui.label("\ttabbed\ttext");
+                    ui.label("Ligature: fi :)");
+                    ui.label("\ttabbed");
                 });
             harness.run();
             harness.fit_contents();

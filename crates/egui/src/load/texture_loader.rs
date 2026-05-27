@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
 use emath::Vec2;
 
 use super::{
@@ -15,7 +17,7 @@ struct PrimaryKey {
 type Bucket = HashMap<Option<SizeHint>, Entry>;
 
 struct Entry {
-    last_used: u64,
+    last_used: AtomicU64,
 
     /// Size of the original SVG, if any, or the texel size of the image if not an SVG.
     source_size: Vec2,
@@ -24,14 +26,9 @@ struct Entry {
 }
 
 #[derive(Default)]
-struct State {
-    pass_index: u64,
-    cache: HashMap<PrimaryKey, Bucket>,
-}
-
-#[derive(Default)]
 pub struct DefaultTextureLoader {
-    state: Mutex<State>,
+    pass_index: AtomicU64,
+    cache: Mutex<HashMap<PrimaryKey, Bucket>>,
 }
 
 impl TextureLoader for DefaultTextureLoader {
@@ -58,9 +55,7 @@ impl TextureLoader for DefaultTextureLoader {
             None
         };
 
-        let mut state = self.state.lock();
-        let State { pass_index, cache } = &mut *state;
-
+        let mut cache = self.cache.lock();
         let bucket = cache
             .entry(PrimaryKey {
                 uri: uri.to_owned(),
@@ -68,8 +63,10 @@ impl TextureLoader for DefaultTextureLoader {
             })
             .or_default();
 
-        if let Some(texture) = bucket.get_mut(&svg_size_hint) {
-            texture.last_used = *pass_index;
+        if let Some(texture) = bucket.get(&svg_size_hint) {
+            texture
+                .last_used
+                .store(self.pass_index.load(Relaxed), Relaxed);
             let texture = SizedTexture::new(texture.handle.id(), texture.source_size);
             Ok(TexturePoll::Ready { texture })
         } else {
@@ -82,7 +79,7 @@ impl TextureLoader for DefaultTextureLoader {
                     bucket.insert(
                         svg_size_hint,
                         Entry {
-                            last_used: *pass_index,
+                            last_used: AtomicU64::new(self.pass_index.load(Relaxed)),
                             source_size,
                             handle,
                         },
@@ -107,37 +104,33 @@ impl TextureLoader for DefaultTextureLoader {
     fn forget(&self, uri: &str) {
         log::trace!("forget {uri:?}");
 
-        self.state.lock().cache.retain(|key, _value| key.uri != uri);
+        self.cache.lock().retain(|key, _value| key.uri != uri);
     }
 
     fn forget_all(&self) {
         log::trace!("forget all");
 
-        self.state.lock().cache.clear();
+        self.cache.lock().clear();
     }
 
     fn end_pass(&self, pass_index: u64) {
-        let mut state = self.state.lock();
-        state.pass_index = pass_index;
-
-        let State { pass_index, cache } = &mut *state;
-
+        self.pass_index.store(pass_index, Relaxed);
+        let mut cache = self.cache.lock();
         cache.retain(|_key, bucket| {
             if 2 <= bucket.len() {
                 // There are multiple textures of the same URI (e.g. SVGs of different scales).
                 // This could be because someone has an SVG in a resizable container,
                 // and so we get a lot of different sizes of it.
                 // This could wast VRAM, so we remove the ones that are not used in this frame.
-                bucket.retain(|_, texture| *pass_index <= texture.last_used + 1);
+                bucket.retain(|_, texture| pass_index <= texture.last_used.load(Relaxed) + 1);
             }
             !bucket.is_empty()
         });
     }
 
     fn byte_size(&self) -> usize {
-        self.state
+        self.cache
             .lock()
-            .cache
             .values()
             .map(|bucket| {
                 bucket

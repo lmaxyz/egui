@@ -9,6 +9,7 @@ mod combo_box;
 pub mod frame;
 pub mod menu;
 pub mod modal;
+pub mod old_popup;
 pub mod panel;
 mod popup;
 pub(crate) mod resize;
@@ -25,6 +26,7 @@ pub use {
     combo_box::*,
     frame::Frame,
     modal::{Modal, ModalResponse},
+    old_popup::*,
     panel::*,
     popup::*,
     resize::Resize,
@@ -32,5 +34,5 @@ pub use {
     scroll_area::ScrollArea,
     sides::Sides,
     tooltip::*,
-    window::{Window, WindowDrag},
+    window::Window,
 };

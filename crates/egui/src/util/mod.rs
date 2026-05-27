@@ -8,3 +8,7 @@ pub use id_type_map::IdTypeMap;
 
 pub use epaint::emath::History;
 pub use epaint::util::{hash, hash_with};
+
+/// Deprecated alias for [`crate::cache`].
+#[deprecated = "Use egui::cache instead"]
+pub use crate::cache;

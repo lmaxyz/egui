@@ -12,7 +12,6 @@ use super::web_painter::WebPainter;
 
 pub(crate) struct WebPainterWgpu {
     canvas: HtmlCanvasElement,
-    instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     surface_configuration: wgpu::SurfaceConfiguration,
     render_state: Option<RenderState>,
@@ -24,7 +23,6 @@ pub(crate) struct WebPainterWgpu {
     capture_rx: CaptureReceiver,
     ctx: egui::Context,
     needs_reconfigure: bool,
-    needs_recreate: bool,
 }
 
 /// Owned web display handle that is `Send + Sync`.
@@ -120,7 +118,7 @@ impl WebPainterWgpu {
 
         let surface_configuration = wgpu::SurfaceConfiguration {
             format: render_state.target_format,
-            present_mode: wgpu_options.surface.present_mode,
+            present_mode: wgpu_options.present_mode,
             view_formats: vec![render_state.target_format],
             ..default_configuration
         };
@@ -131,7 +129,6 @@ impl WebPainterWgpu {
 
         Ok(Self {
             canvas,
-            instance,
             render_state: Some(render_state),
             surface,
             surface_configuration,
@@ -143,7 +140,6 @@ impl WebPainterWgpu {
             capture_rx,
             ctx,
             needs_reconfigure: false,
-            needs_recreate: false,
         })
     }
 }
@@ -176,24 +172,6 @@ impl WebPainter for WebPainterWgpu {
                 "Can't paint, wgpu renderer was already disposed",
             ));
         };
-
-        // If the previous frame produced `CurrentSurfaceTexture::Lost`, drop and recreate the
-        // surface from the canvas before re-borrowing `self.render_state` for the rest of paint.
-        if self.needs_recreate {
-            self.needs_recreate = false;
-            match self
-                .instance
-                .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
-            {
-                Ok(new_surface) => {
-                    new_surface.configure(&render_state.device, &self.surface_configuration);
-                    self.surface = new_surface;
-                }
-                Err(err) => {
-                    log::error!("Failed to recreate wgpu surface for canvas: {err}");
-                }
-            }
-        }
 
         let mut encoder =
             render_state
@@ -261,17 +239,9 @@ impl WebPainter for WebPainterWgpu {
                 }
                 other => {
                     match (*self.on_surface_status)(&other) {
-                        SurfaceErrorAction::Reconfigure => {
+                        SurfaceErrorAction::RecreateSurface => {
                             self.surface
                                 .configure(&render_state.device, &self.surface_configuration);
-                        }
-                        SurfaceErrorAction::RecreateSurface => {
-                            // Full recovery needs `&mut self`, which conflicts with the live
-                            // `render_state` / `self.surface` borrows here. Defer to the top
-                            // of the next paint via the `needs_recreate` flag, and request a
-                            // repaint so the next frame actually invokes `paint` to consume it.
-                            self.needs_recreate = true;
-                            self.ctx.request_repaint();
                         }
                         SurfaceErrorAction::SkipFrame => {}
                     }
@@ -365,7 +335,7 @@ impl WebPainter for WebPainterWgpu {
         // Submit the commands: both the main buffer and user-defined ones.
         render_state
             .queue
-            .submit(std::iter::chain(user_cmd_bufs, [encoder.finish()]));
+            .submit(user_cmd_bufs.into_iter().chain([encoder.finish()]));
 
         if let Some((frame, capture_buffer)) = frame_and_capture_buffer {
             if let Some(capture_buffer) = capture_buffer

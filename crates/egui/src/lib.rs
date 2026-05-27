@@ -112,8 +112,8 @@
 //! loop {
 //!     let raw_input: egui::RawInput = gather_input();
 //!
-//!     let full_output = ctx.run_ui(raw_input, |ui| {
-//!         egui::CentralPanel::default().show(ui, |ui| {
+//!     let full_output = ctx.run(raw_input, |ctx| {
+//!         egui::CentralPanel::default().show(&ctx, |ui| {
 //!             ui.label("Hello world!");
 //!             if ui.button("Click me").clicked() {
 //!                 // take some action here
@@ -400,7 +400,6 @@ pub(crate) mod grid;
 pub mod gui_zoom;
 mod hit_test;
 mod id;
-mod id_salt;
 mod input_state;
 mod interaction;
 pub mod introspection;
@@ -408,6 +407,8 @@ pub mod layers;
 mod layout;
 pub mod load;
 mod memory;
+#[deprecated = "Use `egui::containers::menu` instead"]
+pub mod menu;
 pub mod os;
 mod painter;
 mod pass_state;
@@ -433,6 +434,9 @@ mod callstack;
 
 pub use accesskit;
 
+#[deprecated = "Use the ahash crate directly."]
+pub use ahash;
+
 pub use epaint;
 pub use epaint::ecolor;
 pub use epaint::emath;
@@ -454,8 +458,8 @@ pub use epaint::{
 pub mod text {
     pub use crate::text_selection::CCursorRange;
     pub use epaint::text::{
-        FontData, FontDefinitions, FontFamily, Fonts, Galley, LayoutJob, LayoutSection, TextFormat,
-        TextWrapping, cursor::CCursor,
+        FontData, FontDefinitions, FontFamily, Fonts, Galley, LayoutJob, LayoutSection, TAB_SIZE,
+        TextFormat, TextWrapping, cursor::CCursor,
     };
 }
 
@@ -467,15 +471,14 @@ pub use self::{
         Key, UserData,
         input::*,
         output::{
-            self, CursorIcon, CustomCursorImage, FullOutput, OpenUrl, OutputCommand,
-            PlatformOutput, UserAttentionType, WidgetInfo,
+            self, CursorIcon, FullOutput, OpenUrl, OutputCommand, PlatformOutput,
+            UserAttentionType, WidgetInfo,
         },
     },
     drag_and_drop::DragAndDrop,
     epaint::text::TextWrapMode,
     grid::Grid,
-    id::{AsId, Id, IdMap, IdSet},
-    id_salt::{AsIdSalt, IdSalt},
+    id::{Id, IdMap, IdSet},
     input_state::{InputOptions, InputState, MultiTouchInfo, PointerState, SurrenderFocusOn},
     layers::{LayerId, Order},
     layout::*,
@@ -488,13 +491,16 @@ pub use self::{
     style::{FontSelection, Spacing, Style, TextStyle, Visuals},
     text::{Galley, TextFormat},
     ui::Ui,
-    ui_builder::{IdSource, UiBuilder},
+    ui_builder::UiBuilder,
     ui_stack::*,
     viewport::*,
     widget_rect::{InteractOptions, WidgetRect, WidgetRects},
     widget_text::{RichText, WidgetText},
     widgets::*,
 };
+
+#[deprecated = "Renamed to CornerRadius"]
+pub type Rounding = CornerRadius;
 
 // ----------------------------------------------------------------------------
 

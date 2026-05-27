@@ -29,8 +29,9 @@ impl crate::View for About {
 
         ui.vertical_centered(|ui| {
             ui.add_space(4.0);
+            let egui_icon = egui::include_image!("../../data/egui-logo.svg");
             ui.add(
-                egui::Image::new(egui::include_image!("../../data/egui-logo.svg"))
+                egui::Image::new(egui_icon.clone())
                     .max_height(30.0)
                     .tint(ui.visuals().strong_text_color()),
             );

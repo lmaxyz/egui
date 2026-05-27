@@ -280,7 +280,7 @@ impl Area {
         self
     }
 
-    /// Constrains this area to [`Context::content_rect`]?
+    /// Constrains this area to [`Context::screen_rect`]?
     ///
     /// Default: `true`.
     #[inline]
@@ -291,7 +291,7 @@ impl Area {
 
     /// Constrain the movement of the window to the given rectangle.
     ///
-    /// For instance: `.constrain_to(ctx.content_rect())`.
+    /// For instance: `.constrain_to(ctx.screen_rect())`.
     #[inline]
     pub fn constrain_to(mut self, constrain_rect: Rect) -> Self {
         self.constrain = true;
@@ -583,7 +583,7 @@ impl Area {
     }
 }
 
-pub(crate) fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {
+fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {
     // We round a lot of rendering to pixels, so we round the whole
     // area positions to pixels too, so avoid widgets appearing to float
     // around independently of each other when the area is dragged.
@@ -594,6 +594,10 @@ pub(crate) fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {
 }
 
 impl Prepared {
+    pub(crate) fn state(&self) -> &AreaState {
+        &self.state
+    }
+
     pub(crate) fn state_mut(&mut self) -> &mut AreaState {
         &mut self.state
     }
