@@ -43,7 +43,7 @@ fn button_node() {
     let button_text = "This is a test button!";
 
     let output = accesskit_output_single_egui_frame(|ui| {
-        CentralPanel::default().show_inside(ui, |ui| ui.button(button_text));
+        CentralPanel::default().show(ui, |ui| ui.button(button_text));
     });
 
     let (_, button) = output
@@ -61,7 +61,7 @@ fn disabled_button_node() {
     let button_text = "This is a test button!";
 
     let output = accesskit_output_single_egui_frame(|ui| {
-        CentralPanel::default().show_inside(ui, |ui| {
+        CentralPanel::default().show(ui, |ui| {
             ui.add_enabled(false, egui::Button::new(button_text))
         });
     });
@@ -82,7 +82,7 @@ fn toggle_button_node() {
 
     let mut selected = false;
     let output = accesskit_output_single_egui_frame(|ui| {
-        CentralPanel::default().show_inside(ui, |ui| ui.toggle_value(&mut selected, button_text));
+        CentralPanel::default().show(ui, |ui| ui.toggle_value(&mut selected, button_text));
     });
 
     let (_, toggle) = output
@@ -98,7 +98,7 @@ fn toggle_button_node() {
 #[test]
 fn multiple_disabled_widgets() {
     let output = accesskit_output_single_egui_frame(|ui| {
-        CentralPanel::default().show_inside(ui, |ui| {
+        CentralPanel::default().show(ui, |ui| {
             ui.add_enabled_ui(false, |ui| {
                 let _ = ui.button("Button 1");
                 let _ = ui.button("Button 2");
@@ -144,7 +144,8 @@ fn accesskit_output_single_egui_frame(run_ui: impl FnMut(&mut Ui)) -> TreeUpdate
     ctx.global_style_mut(|style| style.animation_time = 0.0);
     ctx.enable_accesskit();
 
-    let output = ctx.run_ui(RawInput::default(), run_ui);
+    let mut output = ctx.run_ui(RawInput::default(), run_ui);
+    output.textures_delta.clear(); // Don't panic on drop with unapplied deltas
 
     output
         .platform_output

@@ -1,4 +1,5 @@
-use std::time::{Duration, Instant};
+use core::time::Duration;
+use std::time::Instant;
 
 use winit::{
     application::ApplicationHandler,
@@ -41,7 +42,7 @@ fn create_event_loop(native_options: &mut epi::NativeOptions) -> Result<EventLoo
             ))
         })?);
 
-    if let Some(hook) = std::mem::take(&mut native_options.event_loop_builder) {
+    if let Some(hook) = core::mem::take(&mut native_options.event_loop_builder) {
         hook(&mut builder);
     }
 
@@ -58,7 +59,7 @@ fn with_event_loop<R>(
     mut native_options: epi::NativeOptions,
     f: impl FnOnce(&mut EventLoop<UserEvent>, epi::NativeOptions) -> R,
 ) -> Result<R> {
-    thread_local!(static EVENT_LOOP: std::cell::RefCell<Option<EventLoop<UserEvent>>> = const { std::cell::RefCell::new(None) });
+    thread_local!(static EVENT_LOOP: core::cell::RefCell<Option<EventLoop<UserEvent>>> = const { core::cell::RefCell::new(None) });
 
     EVENT_LOOP.with(|event_loop| {
         // Since we want to reference NativeOptions when creating the EventLoop we can't
@@ -122,13 +123,13 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                 event_result
             }
             EventResult::RepaintNow(window_id) => {
-                log::trace!("RepaintNow of {window_id:?}",);
+                log::trace!("RepaintNow of {window_id:?}");
                 self.windows_next_repaint_times
                     .insert(window_id, Instant::now());
                 event_result
             }
             EventResult::RepaintNext(window_id) => {
-                log::trace!("RepaintNext of {window_id:?}",);
+                log::trace!("RepaintNext of {window_id:?}");
                 self.windows_next_repaint_times
                     .insert(window_id, Instant::now());
                 event_result
@@ -206,7 +207,12 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                         invisible_window_ids.push(*window_id);
                     } else {
                         log::trace!("request_redraw for {window_id:?}");
-                        event_loop.set_control_flow(ControlFlow::Poll);
+                        // Don't switch to `ControlFlow::Poll` here. `request_redraw`
+                        // is enough to wake the event loop, and on Wayland the
+                        // `RedrawRequested` event is only delivered once the
+                        // compositor sends a frame callback. Polling in the meantime
+                        // busy-loops a whole CPU core.
+                        // See https://github.com/emilk/egui/issues/8326.
                         window.request_redraw();
                     }
                 } else {
@@ -236,10 +242,16 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             }
         }
 
+        // Always set an explicit, sleeping control flow. Previously we only set
+        // `WaitUntil` when a repaint was already scheduled, which meant that a
+        // `ControlFlow::Poll` set earlier was never undone once the last timed
+        // repaint had been consumed, leaving the loop spinning.
+        // See https://github.com/emilk/egui/issues/8326.
         let next_repaint_time = self.windows_next_repaint_times.values().min().copied();
-        if let Some(next_repaint_time) = next_repaint_time {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next_repaint_time));
-        }
+        event_loop.set_control_flow(match next_repaint_time {
+            Some(next_repaint_time) => ControlFlow::WaitUntil(next_repaint_time),
+            None => ControlFlow::Wait,
+        });
     }
 }
 
@@ -399,6 +411,7 @@ fn run_and_exit(event_loop: EventLoop<UserEvent>, winit_app: impl WinitApp) -> R
 pub fn run_glow(
     app_name: &str,
     mut native_options: epi::NativeOptions,
+    egui_ctx: Option<egui::Context>,
     app_creator: epi::AppCreator<'_>,
 ) -> Result {
     use super::glow_integration::GlowWinitApp;
@@ -406,13 +419,15 @@ pub fn run_glow(
     #[cfg(not(target_os = "ios"))]
     if native_options.run_and_return {
         return with_event_loop(native_options, |event_loop, native_options| {
-            let glow_eframe = GlowWinitApp::new(event_loop, app_name, native_options, app_creator);
+            let glow_eframe =
+                GlowWinitApp::new(event_loop, app_name, native_options, egui_ctx, app_creator);
             run_and_return(event_loop, glow_eframe)
         })?;
     }
 
     let event_loop = create_event_loop(&mut native_options)?;
-    let glow_eframe = GlowWinitApp::new(&event_loop, app_name, native_options, app_creator);
+    let glow_eframe =
+        GlowWinitApp::new(&event_loop, app_name, native_options, egui_ctx, app_creator);
     run_and_exit(event_loop, glow_eframe)
 }
 
@@ -425,7 +440,7 @@ pub fn create_glow<'a>(
 ) -> impl ApplicationHandler<UserEvent> + 'a {
     use super::glow_integration::GlowWinitApp;
 
-    let glow_eframe = GlowWinitApp::new(event_loop, app_name, native_options, app_creator);
+    let glow_eframe = GlowWinitApp::new(event_loop, app_name, native_options, None, app_creator);
     WinitAppWrapper::new(glow_eframe, true)
 }
 
@@ -435,6 +450,7 @@ pub fn create_glow<'a>(
 pub fn run_wgpu(
     app_name: &str,
     mut native_options: epi::NativeOptions,
+    egui_ctx: Option<egui::Context>,
     app_creator: epi::AppCreator<'_>,
 ) -> Result {
     use super::wgpu_integration::WgpuWinitApp;
@@ -442,13 +458,15 @@ pub fn run_wgpu(
     #[cfg(not(target_os = "ios"))]
     if native_options.run_and_return {
         return with_event_loop(native_options, |event_loop, native_options| {
-            let wgpu_eframe = WgpuWinitApp::new(event_loop, app_name, native_options, app_creator);
+            let wgpu_eframe =
+                WgpuWinitApp::new(event_loop, app_name, native_options, egui_ctx, app_creator);
             run_and_return(event_loop, wgpu_eframe)
         })?;
     }
 
     let event_loop = create_event_loop(&mut native_options)?;
-    let wgpu_eframe = WgpuWinitApp::new(&event_loop, app_name, native_options, app_creator);
+    let wgpu_eframe =
+        WgpuWinitApp::new(&event_loop, app_name, native_options, egui_ctx, app_creator);
     run_and_exit(event_loop, wgpu_eframe)
 }
 
@@ -461,7 +479,7 @@ pub fn create_wgpu<'a>(
 ) -> impl ApplicationHandler<UserEvent> + 'a {
     use super::wgpu_integration::WgpuWinitApp;
 
-    let wgpu_eframe = WgpuWinitApp::new(event_loop, app_name, native_options, app_creator);
+    let wgpu_eframe = WgpuWinitApp::new(event_loop, app_name, native_options, None, app_creator);
     WinitAppWrapper::new(wgpu_eframe, true)
 }
 
@@ -544,7 +562,7 @@ impl<'a> EframeWinitApplication<'a> {
     pub fn pump_eframe_app(
         &mut self,
         event_loop: &mut EventLoop<UserEvent>,
-        timeout: Option<std::time::Duration>,
+        timeout: Option<core::time::Duration>,
     ) -> EframePumpStatus {
         use winit::platform::pump_events::{EventLoopExtPumpEvents as _, PumpStatus};
 

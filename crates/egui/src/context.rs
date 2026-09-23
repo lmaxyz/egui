@@ -1,6 +1,7 @@
 #![warn(missing_docs)] // Let's keep `Context` well-documented.
 
-use std::{borrow::Cow, cell::RefCell, panic::Location, sync::Arc, time::Duration};
+use core::{cell::RefCell, panic::Location, time::Duration};
+use std::{borrow::Cow, sync::Arc};
 
 use emath::GuiRounding as _;
 use epaint::{
@@ -32,7 +33,7 @@ use crate::{
     load::{self, Bytes, Loaders, SizedTexture},
     memory::{Options, Theme},
     os::OperatingSystem,
-    output::FullOutput,
+    output::{FullOutput, LogicOutput},
     pass_state::PassState,
     plugin::{self, TypedPluginHandle},
     resize, response, scroll_area,
@@ -98,7 +99,7 @@ impl ContextImpl {
     fn begin_pass_repaint_logic(&mut self, viewport_id: ViewportId) {
         let viewport = self.viewports.entry(viewport_id).or_default();
 
-        std::mem::swap(
+        core::mem::swap(
             &mut viewport.repaint.prev_causes,
             &mut viewport.repaint.causes,
         );
@@ -243,6 +244,12 @@ pub struct ViewportState {
     // ----------------------
     // Cross-frame statistics:
     pub num_multipass_in_row: usize,
+
+    /// The last theme we sent to the native window via [`ViewportCommand::SetTheme`],
+    /// used to avoid sending redundant commands.
+    ///
+    /// See [`crate::Options::sync_window_theme`].
+    pub(crate) last_sent_window_theme: Option<crate::SystemTheme>,
 }
 
 /// What called [`Context::request_repaint`] or [`Context::request_discard`]?
@@ -258,14 +265,14 @@ pub struct RepaintCause {
     pub reason: Cow<'static, str>,
 }
 
-impl std::fmt::Debug for RepaintCause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for RepaintCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}:{} {}", self.file, self.line, self.reason)
     }
 }
 
-impl std::fmt::Display for RepaintCause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RepaintCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}:{} {}", self.file, self.line, self.reason)
     }
 }
@@ -300,7 +307,7 @@ impl RepaintCause {
 struct ViewportRepaintInfo {
     /// Monotonically increasing counter.
     ///
-    /// Incremented at the end of [`Context::run`].
+    /// Incremented at the end of [`Context::run_ui`].
     /// This can be smaller than [`Self::cumulative_pass_nr`],
     /// but never larger.
     cumulative_frame_nr: u64,
@@ -453,7 +460,7 @@ impl ContextImpl {
 
         self.memory.begin_pass(&new_raw_input, &all_viewport_ids);
 
-        viewport.input = std::mem::take(&mut viewport.input).begin_pass(
+        viewport.input = core::mem::take(&mut viewport.input).begin_pass(
             new_raw_input,
             viewport.repaint.requested_immediate_repaint_prev_pass(),
             pixels_per_point,
@@ -463,10 +470,16 @@ impl ContextImpl {
 
         let content_rect = viewport.input.content_rect();
 
-        viewport.this_pass.begin_pass(content_rect);
+        viewport.this_pass.begin_pass();
 
         {
-            let mut layers: Vec<LayerId> = viewport.prev_pass.widgets.layer_ids().collect();
+            // Areas that are not interactable are click-through: skip them in the hit-test.
+            let mut layers: Vec<LayerId> = viewport
+                .prev_pass
+                .widgets
+                .layer_ids()
+                .filter(|layer_id| self.memory.areas().is_interactable(*layer_id))
+                .collect();
             layers.sort_by(|&a, &b| self.memory.areas().compare_order(a, b));
 
             viewport.hits = if let Some(pos) = viewport.input.pointer.interact_pos() {
@@ -641,11 +654,7 @@ impl ContextImpl {
     }
 
     fn all_viewport_ids(&self) -> ViewportIdSet {
-        self.viewports
-            .keys()
-            .copied()
-            .chain([ViewportId::ROOT])
-            .collect()
+        core::iter::chain(self.viewports.keys().copied(), [ViewportId::ROOT]).collect()
     }
 
     /// The current active viewport
@@ -697,8 +706,8 @@ impl ContextImpl {
 /// // Game loop:
 /// loop {
 ///     let raw_input = egui::RawInput::default();
-///     let full_output = ctx.run(raw_input, |ctx| {
-///         egui::CentralPanel::default().show(&ctx, |ui| {
+///     let full_output = ctx.run_ui(raw_input, |ui| {
+///         egui::CentralPanel::default().show(ui, |ui| {
 ///             ui.label("Hello world!");
 ///             if ui.button("Click me").clicked() {
 ///                 // take some action here
@@ -713,13 +722,13 @@ impl ContextImpl {
 #[derive(Clone)]
 pub struct Context(Arc<RwLock<ContextImpl>>);
 
-impl std::fmt::Debug for Context {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Context {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Context").finish_non_exhaustive()
     }
 }
 
-impl std::cmp::PartialEq for Context {
+impl core::cmp::PartialEq for Context {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -729,7 +738,7 @@ impl Default for Context {
     fn default() -> Self {
         let ctx_impl = ContextImpl {
             embed_viewports: true,
-            viewports: std::iter::once((ViewportId::ROOT, ViewportState::default())).collect(),
+            viewports: core::iter::once((ViewportId::ROOT, ViewportState::default())).collect(),
             ..Default::default()
         };
         let ctx = Self(Arc::new(RwLock::new(ctx_impl)));
@@ -779,10 +788,8 @@ impl Context {
     ///     ui.label("Hello egui!");
     /// });
     /// // handle full_output
+    /// # full_output.drop_without_applying_deltas();
     /// ```
-    ///
-    /// ## See also
-    /// * [`Self::run`]
     #[must_use]
     pub fn run_ui(&self, new_input: RawInput, mut run_ui: impl FnMut(&mut Ui)) -> FullOutput {
         self.run_ui_dyn(new_input, &mut run_ui)
@@ -791,14 +798,13 @@ impl Context {
     #[must_use]
     fn run_ui_dyn(&self, new_input: RawInput, run_ui: &mut dyn FnMut(&mut Ui)) -> FullOutput {
         let plugins = self.read(|ctx| ctx.plugins.ordered_plugins());
-        #[expect(deprecated)]
-        self.run(new_input, |ctx| {
+        self.run_dyn(new_input, &mut |ctx| {
             let mut root_ui = Ui::new(
                 ctx.clone(),
                 Id::new((ctx.viewport_id(), "__top_ui")),
                 UiBuilder::new()
                     .layer_id(LayerId::background())
-                    .max_rect(ctx.available_rect()),
+                    .max_rect(ctx.viewport_rect()),
             );
 
             {
@@ -812,38 +818,6 @@ impl Context {
                 state.root_ui_min_rect = Some(root_ui.min_rect());
             });
         })
-    }
-
-    /// Run the ui code for one frame.
-    ///
-    /// At most [`Options::max_passes`] calls will be issued to `run_ui`,
-    /// and only on the rare occasion that [`Context::request_discard`] is called.
-    /// Usually, it `run_ui` will only be called once.
-    ///
-    /// Put your widgets into a [`crate::Panel`], [`crate::CentralPanel`], [`crate::Window`] or [`crate::Area`].
-    ///
-    /// Instead of calling `run`, you can alternatively use [`Self::begin_pass`] and [`Context::end_pass`].
-    ///
-    /// ```
-    /// // One egui context that you keep reusing:
-    /// let mut ctx = egui::Context::default();
-    ///
-    /// // Each frame:
-    /// let input = egui::RawInput::default();
-    /// let full_output = ctx.run(input, |ctx| {
-    ///     egui::CentralPanel::default().show(&ctx, |ui| {
-    ///         ui.label("Hello egui!");
-    ///     });
-    /// });
-    /// // handle full_output
-    /// ```
-    ///
-    /// ## See also
-    /// * [`Self::run_ui`]
-    #[must_use]
-    #[deprecated = "Call run_ui instead"]
-    pub fn run(&self, new_input: RawInput, mut run_ui: impl FnMut(&Self)) -> FullOutput {
-        self.run_dyn(new_input, &mut run_ui)
     }
 
     #[must_use]
@@ -874,7 +848,7 @@ impl Context {
             self.write(|ctx| {
                 let viewport = ctx.viewport_for(viewport_id);
                 viewport.output.num_completed_passes =
-                    std::mem::take(&mut output.platform_output.num_completed_passes);
+                    core::mem::take(&mut output.platform_output.num_completed_passes);
                 output.platform_output.request_discard_reasons.clear();
             });
 
@@ -915,10 +889,61 @@ impl Context {
         output
     }
 
-    /// An alternative to calling [`Self::run`].
+    /// Run app logic without showing any ui.
     ///
-    /// It is usually better to use [`Self::run`], because
-    /// `run` supports multi-pass layout using [`Self::request_discard`].
+    /// Use this instead of [`Self::run_ui`] when nothing will be shown,
+    /// e.g. because the window is minimized or occluded,
+    /// but you still want to let the app tick its logic
+    /// (so that it can e.g. ask to be shown again with [`ViewportCommand::Focus`]).
+    ///
+    /// No pass is run, so `f` must not show any ui.
+    /// This means everything egui knows about the ui is left untouched:
+    /// no widget state is garbage-collected, no animation advances,
+    /// and nothing loses focus.
+    ///
+    /// Of `new_input`, only the window state ([`RawInput::viewports`] and
+    /// [`RawInput::focused`]) is used, so that `f` can tell that the window is hidden.
+    /// The ui input (events, time, …) is _not_ interpreted, and is left for the next
+    /// call to [`Self::run_ui`]: [`Self::input`] is otherwise still that of the last pass.
+    ///
+    /// The returned [`LogicOutput`] is what [`FullOutput`] would have carried:
+    /// anything `f` asked the integration to do.
+    /// There is nothing to paint.
+    #[must_use]
+    pub fn run_logic(&self, new_input: &RawInput, logic: impl FnOnce(&Self)) -> LogicOutput {
+        profiling::function_scope!();
+
+        let viewport_id = new_input.viewport_id;
+
+        self.write(|ctx| {
+            // Consume any outstanding repaint request, so that a new request from `logic`
+            // reaches the integration instead of being considered already served:
+            ctx.begin_pass_repaint_logic(viewport_id);
+
+            // Tell `logic` about the windows, but leave the ui input alone:
+            let raw = &mut ctx.viewport_for(viewport_id).input.raw;
+            raw.viewport_id = viewport_id;
+            raw.viewports = new_input.viewports.clone();
+            raw.focused = new_input.focused;
+        });
+
+        logic(self);
+
+        self.write(|ctx| LogicOutput {
+            platform_output: core::mem::take(&mut ctx.viewport_for(viewport_id).output),
+            viewport_commands: ctx
+                .viewports
+                .iter_mut()
+                .filter(|(_, viewport)| !viewport.commands.is_empty())
+                .map(|(&id, viewport)| (id, core::mem::take(&mut viewport.commands)))
+                .collect(),
+        })
+    }
+
+    /// An alternative to calling [`Self::run_ui`].
+    ///
+    /// It is usually better to use [`Self::run_ui`], because
+    /// `run_ui` supports multi-pass layout using [`Self::request_discard`].
     ///
     /// ```
     /// // One egui context that you keep reusing:
@@ -928,26 +953,19 @@ impl Context {
     /// let input = egui::RawInput::default();
     /// ctx.begin_pass(input);
     ///
-    /// egui::CentralPanel::default().show(&ctx, |ui| {
-    ///     ui.label("Hello egui!");
-    /// });
+    /// // … add panels and windows here …
     ///
     /// let full_output = ctx.end_pass();
     /// // handle full_output
+    /// # full_output.drop_without_applying_deltas();
     /// ```
     pub fn begin_pass(&self, mut new_input: RawInput) {
         profiling::function_scope!();
 
         let plugins = self.read(|ctx| ctx.plugins.ordered_plugins());
-        plugins.on_input(&mut new_input);
+        plugins.on_input(self, &mut new_input);
 
         self.write(|ctx| ctx.begin_pass(new_input));
-    }
-
-    /// See [`Self::begin_pass`].
-    #[deprecated = "Renamed begin_pass"]
-    pub fn begin_frame(&self, new_input: RawInput) {
-        self.begin_pass(new_input);
     }
 }
 
@@ -1049,7 +1067,7 @@ impl Context {
 
     /// Read-only access to [`PassState`].
     ///
-    /// This is only valid during the call to [`Self::run`] (between [`Self::begin_pass`] and [`Self::end_pass`]).
+    /// This is only valid during the call to [`Self::run_ui`] (between [`Self::begin_pass`] and [`Self::end_pass`]).
     #[inline]
     pub(crate) fn pass_state<R>(&self, reader: impl FnOnce(&PassState) -> R) -> R {
         self.write(move |ctx| reader(&ctx.viewport().this_pass))
@@ -1057,7 +1075,7 @@ impl Context {
 
     /// Read-write access to [`PassState`].
     ///
-    /// This is only valid during the call to [`Self::run`] (between [`Self::begin_pass`] and [`Self::end_pass`]).
+    /// This is only valid during the call to [`Self::run_ui`] (between [`Self::begin_pass`] and [`Self::end_pass`]).
     #[inline]
     pub(crate) fn pass_state_mut<R>(&self, writer: impl FnOnce(&mut PassState) -> R) -> R {
         self.write(move |ctx| writer(&mut ctx.viewport().this_pass))
@@ -1073,7 +1091,7 @@ impl Context {
 
     /// Read-only access to [`Fonts`].
     ///
-    /// Not valid until first call to [`Context::run()`].
+    /// Not valid until first call to [`Context::run_ui()`].
     /// That's because since we don't know the proper `pixels_per_point` until then.
     #[inline]
     pub fn fonts<R>(&self, reader: impl FnOnce(&FontsView<'_>) -> R) -> R {
@@ -1090,7 +1108,7 @@ impl Context {
 
     /// Read-write access to [`Fonts`].
     ///
-    /// Not valid until first call to [`Context::run()`].
+    /// Not valid until first call to [`Context::run_ui()`].
     /// That's because since we don't know the proper `pixels_per_point` until then.
     #[inline]
     pub fn fonts_mut<R>(&self, reader: impl FnOnce(&mut FontsView<'_>) -> R) -> R {
@@ -1233,6 +1251,8 @@ impl Context {
         allow_focus: bool,
         options: crate::InteractOptions,
     ) -> Response {
+        debug_assert!(!w.rect.any_nan(), "widget rect is NaN: {:?}", w.rect);
+
         let interested_in_focus = w.enabled
             && w.sense.is_focusable()
             && self.memory(|mem| mem.allows_interaction(w.layer_id));
@@ -1353,6 +1373,52 @@ impl Context {
             })
         })
         .map(|widget_rect| self.get_response(widget_rect))
+    }
+
+    /// Rectangles that could receive pointer input in the last completed pass.
+    ///
+    /// This exposes the same widget rectangles egui uses for hit-testing, after
+    /// filtering out disabled widgets, non-interactive widgets, and layers that
+    /// are currently blocked from interaction. The returned rectangles are in
+    /// global viewport coordinates, with layer transforms applied.
+    ///
+    /// This is meant for integrations that must declare platform input regions
+    /// before pointer events can be delivered to egui, such as transparent or
+    /// click-through overlays.
+    #[must_use]
+    pub fn interactive_rects_last_pass(&self) -> Vec<Rect> {
+        self.read(|ctx| {
+            let Some(viewport) = ctx.viewports.get(&ctx.viewport_id()) else {
+                return Vec::new();
+            };
+
+            let mut layers: Vec<LayerId> = viewport.prev_pass.widgets.layer_ids().collect();
+            layers.sort_by(|&a, &b| ctx.memory.areas().compare_order(a, b));
+
+            let mut rects = Vec::new();
+            for layer_id in layers {
+                if !ctx.memory.allows_interaction(layer_id) {
+                    continue;
+                }
+
+                let to_global = ctx.memory.to_global.get(&layer_id).copied();
+                for widget in viewport.prev_pass.widgets.get_layer(layer_id) {
+                    if !widget.enabled || !widget.sense.interactive() {
+                        continue;
+                    }
+
+                    let rect = if let Some(to_global) = to_global {
+                        to_global * widget.interact_rect
+                    } else {
+                        widget.interact_rect
+                    };
+                    if rect.is_positive() && rect.is_finite() {
+                        rects.push(rect);
+                    }
+                }
+            }
+            rects
+        })
     }
 
     /// Do all interaction for an existing widget, without (re-)registering it.
@@ -1581,6 +1647,19 @@ impl Context {
         self.output_mut(|o| o.cursor_icon = cursor_icon);
     }
 
+    /// Request that the integration display this RGBA bitmap as the OS
+    /// cursor for the next frame, instead of the standard `cursor_icon`.
+    /// Backends that don't support custom cursors (web, eframe with
+    /// non-winit integrations) silently fall back to the icon.
+    ///
+    /// Pass `None` to clear and revert to `cursor_icon` selection.
+    ///
+    /// The integration is expected to dedupe by `Arc` pointer identity,
+    /// so reusing the same `Arc<[u8]>` across frames is cheap.
+    pub fn set_cursor_image(&self, image: Option<crate::CustomCursorImage>) {
+        self.output_mut(|o| o.cursor_image = image);
+    }
+
     /// Add a command to [`PlatformOutput::commands`],
     /// for the integration to execute at the end of the frame.
     pub fn send_cmd(&self, cmd: crate::OutputCommand) {
@@ -1666,7 +1745,7 @@ impl Context {
 
     /// The total number of completed frames.
     ///
-    /// Starts at zero, and is incremented once at the end of each call to [`Self::run`].
+    /// Starts at zero, and is incremented once at the end of each call to [`Self::run_ui`].
     ///
     /// This is always smaller or equal to [`Self::cumulative_pass_nr`].
     pub fn cumulative_frame_nr(&self) -> u64 {
@@ -1675,7 +1754,7 @@ impl Context {
 
     /// The total number of completed frames.
     ///
-    /// Starts at zero, and is incremented once at the end of each call to [`Self::run`].
+    /// Starts at zero, and is incremented once at the end of each call to [`Self::run_ui`].
     ///
     /// This is always smaller or equal to [`Self::cumulative_pass_nr_for`].
     pub fn cumulative_frame_nr_for(&self, id: ViewportId) -> u64 {
@@ -1695,7 +1774,7 @@ impl Context {
 
     /// The total number of completed passes (usually there is one pass per rendered frame).
     ///
-    /// Starts at zero, and is incremented for each completed pass inside of [`Self::run`] (usually once).
+    /// Starts at zero, and is incremented for each completed pass inside of [`Self::run_ui`] (usually once).
     ///
     /// If you instead want to know which pass index this is within the current frame,
     /// use [`Self::current_pass_index`].
@@ -1705,7 +1784,7 @@ impl Context {
 
     /// The total number of completed passes (usually there is one pass per rendered frame).
     ///
-    /// Starts at zero, and is incremented for each completed pass inside of [`Self::run`] (usually once).
+    /// Starts at zero, and is incremented for each completed pass inside of [`Self::run_ui`] (usually once).
     pub fn cumulative_pass_nr_for(&self, id: ViewportId) -> u64 {
         self.read(|ctx| {
             ctx.viewports
@@ -1799,7 +1878,7 @@ impl Context {
     /// See [`Self::request_repaint_after`] for details.
     #[track_caller]
     pub fn request_repaint_after_secs(&self, seconds: f32) {
-        if let Ok(duration) = std::time::Duration::try_from_secs_f32(seconds) {
+        if let Ok(duration) = core::time::Duration::try_from_secs_f32(seconds) {
             self.request_repaint_after(duration);
         }
     }
@@ -1982,7 +2061,7 @@ impl Context {
         &self,
         f: impl FnOnce(&mut T) -> R,
     ) -> Option<R> {
-        let plugin = self.read(|ctx| ctx.plugins.get(std::any::TypeId::of::<T>()));
+        let plugin = self.read(|ctx| ctx.plugins.get(core::any::TypeId::of::<T>()));
         plugin.map(|plugin| f(plugin.lock().typed_plugin_mut()))
     }
 
@@ -1994,13 +2073,13 @@ impl Context {
         if let Some(plugin) = self.plugin_opt() {
             plugin
         } else {
-            panic!("Plugin of type {:?} not found", std::any::type_name::<T>());
+            panic!("Plugin of type {:?} not found", core::any::type_name::<T>());
         }
     }
 
     /// Get a handle to the plugin of type `T`, if it was registered.
     pub fn plugin_opt<T: plugin::Plugin>(&self) -> Option<TypedPluginHandle<T>> {
-        let plugin = self.read(|ctx| ctx.plugins.get(std::any::TypeId::of::<T>()));
+        let plugin = self.read(|ctx| ctx.plugins.get(core::any::TypeId::of::<T>()));
         plugin.map(TypedPluginHandle::new)
     }
 
@@ -2080,7 +2159,7 @@ impl Context {
         self.options(|opt| opt.theme())
     }
 
-    /// The [`Theme`] used to select between dark and light [`Self::style`]
+    /// The [`Theme`] used to select between dark and light [`Self::global_style`]
     /// as the active style used by all subsequent popups, menus, etc.
     ///
     /// Example:
@@ -2094,12 +2173,6 @@ impl Context {
 
     /// The currently active [`Style`] used by all subsequent popups, menus, etc.
     pub fn global_style(&self) -> Arc<Style> {
-        self.options(|opt| Arc::clone(opt.style()))
-    }
-
-    /// The currently active [`Style`] used by all subsequent popups, menus, etc.
-    #[deprecated = "Renamed to `global_style` to avoid confusion with `ui.style()`"]
-    pub fn style(&self) -> Arc<Style> {
         self.options(|opt| Arc::clone(opt.style()))
     }
 
@@ -2117,21 +2190,6 @@ impl Context {
         self.options_mut(|opt| mutate_style(Arc::make_mut(opt.style_mut())));
     }
 
-    /// Mutate the currently active [`Style`] used by all subsequent popups, menus, etc.
-    /// Use [`Self::all_styles_mut`] to mutate both dark and light mode styles.
-    ///
-    /// Example:
-    /// ```
-    /// # let mut ctx = egui::Context::default();
-    /// ctx.global_style_mut(|style| {
-    ///     style.spacing.item_spacing = egui::vec2(10.0, 20.0);
-    /// });
-    /// ```
-    #[deprecated = "Renamed to `global_style_mut` to avoid confusion with `ui.style_mut()`"]
-    pub fn style_mut(&self, mutate_style: impl FnOnce(&mut Style)) {
-        self.options_mut(|opt| mutate_style(Arc::make_mut(opt.style_mut())));
-    }
-
     /// The currently active [`Style`] used by all new popups, menus, etc.
     ///
     /// Use [`Self::all_styles_mut`] to mutate both dark and light mode styles.
@@ -2140,18 +2198,6 @@ impl Context {
     ///
     /// You can use [`Ui::style_mut`] to change the style of a single [`Ui`].
     pub fn set_global_style(&self, style: impl Into<Arc<Style>>) {
-        self.options_mut(|opt| *opt.style_mut() = style.into());
-    }
-
-    /// The currently active [`Style`] used by all new popups, menus, etc.
-    ///
-    /// Use [`Self::all_styles_mut`] to mutate both dark and light mode styles.
-    ///
-    /// You can also change this using [`Self::style_mut`].
-    ///
-    /// You can use [`Ui::style_mut`] to change the style of a single [`Ui`].
-    #[deprecated = "Renamed to `set_global_style` to avoid confusion with `ui.set_style()`"]
-    pub fn set_style(&self, style: impl Into<Arc<Style>>) {
         self.options_mut(|opt| *opt.style_mut() = style.into());
     }
 
@@ -2407,28 +2453,56 @@ impl Context {
             }
         }
 
+        self.sync_window_theme();
+
         #[cfg(debug_assertions)]
         self.debug_painting();
 
         let mut output = self.write(|ctx| ctx.end_pass());
 
         let plugins = self.read(|ctx| ctx.plugins.ordered_plugins());
-        plugins.on_output(&mut output);
+        plugins.on_output(self, &mut output);
 
         output
     }
 
-    /// Call at the end of each frame if you called [`Context::begin_pass`].
-    #[must_use]
-    #[deprecated = "Renamed end_pass"]
-    pub fn end_frame(&self) -> FullOutput {
-        self.end_pass()
+    /// Keep the native window theme in sync with the egui [`crate::ThemePreference`],
+    /// if [`crate::Options::sync_window_theme`] is enabled.
+    ///
+    /// Sends a [`ViewportCommand::SetTheme`] to the current viewport whenever the
+    /// derived theme changes, so the native window decorations match the egui theme.
+    fn sync_window_theme(&self) {
+        if !self.options(|o| o.sync_window_theme) {
+            return;
+        }
+
+        use crate::{SystemTheme, ThemePreference};
+        let window_theme = match self.options(|o| o.theme_preference) {
+            ThemePreference::System => SystemTheme::SystemDefault,
+            ThemePreference::Dark => SystemTheme::Dark,
+            ThemePreference::Light => SystemTheme::Light,
+        };
+
+        let changed = self.write(|ctx| {
+            let viewport = ctx.viewport();
+            if viewport.last_sent_window_theme == Some(window_theme) {
+                false
+            } else {
+                viewport.last_sent_window_theme = Some(window_theme);
+                true
+            }
+        });
+
+        if changed {
+            self.send_viewport_cmd(ViewportCommand::SetTheme(window_theme));
+        }
     }
 
     /// Called at the end of the pass.
     #[cfg(debug_assertions)]
     fn debug_painting(&self) {
         #![expect(clippy::iter_over_hash_type)] // ok to be sloppy in debug painting
+        use core::fmt::Write as _;
 
         let paint_widget = |widget: &WidgetRect, text: &str, color: Color32| {
             let rect = widget.interact_rect;
@@ -2501,13 +2575,17 @@ impl Context {
                     for id in contains_pointer {
                         let mut widget_text = format!("{id:?}");
                         if let Some(rect) = widget_rects.get(id) {
-                            widget_text +=
-                                &format!(" {:?} {:?} {:?}", rect.layer_id, rect.rect, rect.sense);
+                            write!(
+                                widget_text,
+                                " {:?} {:?} {:?}",
+                                rect.layer_id, rect.rect, rect.sense
+                            )
+                            .ok();
                         }
                         if let Some(info) = widget_rects.info(id) {
-                            widget_text += &format!(" {info:?}");
+                            write!(widget_text, " {info:?}").ok();
                         }
-                        debug_text += &format!("{widget_text}\n");
+                        writeln!(debug_text, "{widget_text}").ok();
                     }
                     self.debug_text(debug_text);
                 }
@@ -2572,7 +2650,7 @@ impl Context {
             );
             self.viewport(|vp| {
                 for reason in &vp.output.request_discard_reasons {
-                    warning += &format!("\n  {reason}");
+                    write!(warning, "\n  {reason}").ok();
                 }
             });
 
@@ -2605,7 +2683,13 @@ impl ContextImpl {
         // Inform the backend of all textures that have been updated (including font atlas).
         let textures_delta = self.tex_manager.0.write().take_delta();
 
-        let mut platform_output: PlatformOutput = std::mem::take(&mut viewport.output);
+        let mut platform_output: PlatformOutput = core::mem::take(&mut viewport.output);
+
+        if self.memory.should_interrupt_ime()
+            && let Some(ime) = &mut platform_output.ime
+        {
+            ime.should_interrupt_composition = true;
+        }
 
         {
             profiling::scope!("accesskit");
@@ -2659,7 +2743,7 @@ impl ContextImpl {
             shapes
         };
 
-        std::mem::swap(&mut viewport.prev_pass, &mut viewport.this_pass);
+        core::mem::swap(&mut viewport.prev_pass, &mut viewport.this_pass);
 
         if repaint_needed {
             self.request_repaint(ended_viewport_id, RepaintCause::new());
@@ -2721,7 +2805,7 @@ impl ContextImpl {
                     // Let the primary immediate viewport handle the commands of its children too.
                     // This can make things easier for the backend, as otherwise we may get commands
                     // that affect a viewport while its egui logic is running.
-                    std::mem::take(&mut viewport.commands)
+                    core::mem::take(&mut viewport.commands)
                 } else {
                     vec![]
                 };
@@ -2838,21 +2922,6 @@ impl Context {
         self.input(|i| i.viewport_rect()).round_ui()
     }
 
-    /// Position and size of the egui area.
-    #[deprecated(
-        note = "screen_rect has been split into viewport_rect() and content_rect(). You likely should use content_rect()"
-    )]
-    pub fn screen_rect(&self) -> Rect {
-        self.input(|i| i.content_rect()).round_ui()
-    }
-
-    /// How much space is still available after panels have been added.
-    #[deprecated = "Use content_rect (or viewport_rect) instead"]
-    pub fn available_rect(&self) -> Rect {
-        #[expect(deprecated)] // legacy
-        self.pass_state(|s| s.available_rect()).round_ui()
-    }
-
     /// How much space is used by windows and the top-level [`Ui`].
     pub fn globally_used_rect(&self) -> Rect {
         self.write(|ctx| {
@@ -2860,29 +2929,12 @@ impl Context {
             let root_ui_min_rect =
                 (viewport.this_pass.root_ui_min_rect).or(viewport.prev_pass.root_ui_min_rect);
 
-            let mut used = root_ui_min_rect.unwrap_or_else(|| {
-                #[expect(deprecated)] // legacy
-                ctx.viewport().this_pass.used_by_panels
-            });
+            let mut used = root_ui_min_rect.unwrap_or(Rect::NOTHING);
             for (_id, window) in ctx.memory.areas().visible_windows() {
                 used |= window.rect();
             }
             used.round_ui()
         })
-    }
-
-    /// How much space is used by windows and the top-level [`Ui`].
-    #[deprecated = "Renamed to globally_used_rect"]
-    pub fn used_rect(&self) -> Rect {
-        self.globally_used_rect()
-    }
-
-    /// How much space is used by windows and the top-level [`Ui`].
-    ///
-    /// You can shrink your egui area to this size and still fit all egui components.
-    #[deprecated = "Use globally_used_rect instead"]
-    pub fn used_size(&self) -> Vec2 {
-        (self.globally_used_rect().max - Pos2::ZERO).round_ui()
     }
 
     // ---------------------------------------------------------------------
@@ -2905,19 +2957,11 @@ impl Context {
                 // Modern `run_ui` code
                 !root_ui_available_rect.contains(pointer_pos)
             } else {
-                // Legacy code
-                #[expect(deprecated)]
-                !self.pass_state(|state| state.unused_rect.contains(pointer_pos))
+                true // We shouldn't get here, but who knows
             }
         } else {
             true
         }
-    }
-
-    /// Is the pointer (mouse/touch) over any egui area?
-    #[deprecated = "Renamed to is_pointer_over_egui"]
-    pub fn is_pointer_over_area(&self) -> bool {
-        self.is_pointer_over_egui()
     }
 
     /// True if egui is currently interested in the pointer (mouse or touch).
@@ -2931,17 +2975,6 @@ impl Context {
             || (self.is_pointer_over_egui() && !self.input(|i| i.pointer.any_down()))
     }
 
-    /// True if egui is currently interested in the pointer (mouse or touch).
-    ///
-    /// Could be the pointer is hovering over a [`crate::Window`] or the user is dragging a widget.
-    /// If `false`, the pointer is outside of any egui area and so
-    /// you may be interested in what it is doing (e.g. controlling your game).
-    /// Returns `false` if a drag started outside of egui and then moved over an egui area.
-    #[deprecated = "Renamed to egui_wants_pointer_input"]
-    pub fn wants_pointer_input(&self) -> bool {
-        self.egui_wants_pointer_input()
-    }
-
     /// Is egui currently using the pointer position (e.g. dragging a slider)?
     ///
     /// NOTE: this will return `false` if the pointer is just hovering over an egui area.
@@ -2949,23 +2982,9 @@ impl Context {
         self.memory(|m| m.interaction().is_using_pointer())
     }
 
-    /// Is egui currently using the pointer position (e.g. dragging a slider)?
-    ///
-    /// NOTE: this will return `false` if the pointer is just hovering over an egui area.
-    #[deprecated = "Renamed to egui_is_using_pointer"]
-    pub fn is_using_pointer(&self) -> bool {
-        self.egui_is_using_pointer()
-    }
-
     /// If `true`, egui is currently listening on text input (e.g. typing text in a [`crate::TextEdit`]).
     pub fn egui_wants_keyboard_input(&self) -> bool {
         self.memory(|m| m.focused().is_some())
-    }
-
-    /// If `true`, egui is currently listening on text input (e.g. typing text in a [`crate::TextEdit`]).
-    #[deprecated = "Renamed to egui_wants_keyboard_input"]
-    pub fn wants_keyboard_input(&self) -> bool {
-        self.egui_wants_keyboard_input()
     }
 
     /// Is the currently focused widget a text edit?
@@ -2987,34 +3006,10 @@ impl Context {
         self.pass_state_mut(|fs| fs.highlight_next_pass.insert(id));
     }
 
-    /// Is an egui context menu open?
-    ///
-    /// This only works with the old, deprecated [`crate::menu`] API.
-    #[expect(deprecated)]
-    #[deprecated = "Use `any_popup_open` instead"]
-    pub fn is_context_menu_open(&self) -> bool {
-        self.data(|d| {
-            d.get_temp::<crate::menu::BarState>(crate::menu::CONTEXT_MENU_ID_STR.into())
-                .is_some_and(|state| state.has_root())
-        })
-    }
-
     /// Is a popup or (context) menu open?
     ///
     /// Will return false for [`crate::Tooltip`]s (which are technically popups as well).
     pub fn any_popup_open(&self) -> bool {
-        self.pass_state_mut(|fs| {
-            fs.layers
-                .values()
-                .any(|layer| !layer.open_popups.is_empty())
-        })
-    }
-
-    /// Is a popup or (context) menu open?
-    ///
-    /// Will return false for [`crate::Tooltip`]s (which are technically popups as well).
-    #[deprecated = "Renamed to any_popup_open"]
-    pub fn is_popup_open(&self) -> bool {
         self.pass_state_mut(|fs| {
             fs.layers
                 .values()
@@ -3313,7 +3308,8 @@ impl Context {
         for (name, data) in &mut font_definitions.font_data {
             ui.collapsing(name, |ui| {
                 let mut tweak = data.tweak.clone();
-                if tweak.ui(ui).changed() {
+                let axes = data.variation_axes();
+                if crate::style::font_tweak_ui(ui, &mut tweak, &axes).changed() {
                     Arc::make_mut(data).tweak = tweak;
                     changed = true;
                 }
@@ -3612,7 +3608,7 @@ impl Context {
                     if !is_visible {
                         continue;
                     }
-                    let text = format!("{} - {:?}", layer_id.short_debug_format(), area.rect(),);
+                    let text = format!("{} - {:?}", layer_id.short_debug_format(), area.rect());
                     // TODO(emilk): `Sense::hover_highlight()`
                     let response =
                         ui.add(Label::new(RichText::new(text).monospace()).sense(Sense::click()));
@@ -3632,17 +3628,6 @@ impl Context {
             ));
             if ui.button("Reset").clicked() {
                 self.data_mut(|d| d.remove_by_type::<containers::collapsing_header::InnerState>());
-            }
-        });
-
-        #[expect(deprecated)]
-        ui.horizontal(|ui| {
-            ui.label(format!(
-                "{} menu bars",
-                self.data(|d| d.count::<crate::menu::BarState>())
-            ));
-            if ui.button("Reset").clicked() {
-                self.data_mut(|d| d.remove_by_type::<crate::menu::BarState>());
             }
         });
 
@@ -3998,8 +3983,8 @@ impl Context {
     /// When called, the integration needs to:
     /// * Check if there already is a window for this viewport id, and if not open one
     /// * Set the window attributes (position, size, …) based on [`ImmediateViewport::builder`].
-    /// * Call [`Context::run`] with [`ImmediateViewport::viewport_ui_cb`].
-    /// * Handle the output from [`Context::run`], including rendering
+    /// * Call [`Context::run_ui`] with [`ImmediateViewport::viewport_ui_cb`].
+    /// * Handle the output from [`Context::run_ui`], including rendering
     pub fn set_immediate_viewport_renderer(
         callback: impl for<'a> Fn(&Self, ImmediateViewport<'a>) + 'static,
     ) {
@@ -4203,7 +4188,7 @@ impl Context {
 
 /// ## Interaction
 impl Context {
-    /// Read you what widgets are currently being interacted with.
+    /// Read which widgets are currently being interacted with.
     pub fn interaction_snapshot<R>(&self, reader: impl FnOnce(&InteractionSnapshot) -> R) -> R {
         self.write(|w| reader(&w.viewport().interact_widgets))
     }
@@ -4305,13 +4290,13 @@ fn warn_if_rect_changes_id(
     struct OrderedRect(Rect);
 
     impl PartialOrd for OrderedRect {
-        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
             Some(self.cmp(other))
         }
     }
 
     impl Ord for OrderedRect {
-        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        fn cmp(&self, other: &Self) -> core::cmp::Ordering {
             let lhs = self.0;
             let rhs = other.0;
             lhs.min
@@ -4413,6 +4398,7 @@ mod test {
             assert_eq!(num_calls, 1);
             assert_eq!(output.platform_output.num_completed_passes, 1);
             assert!(!output.platform_output.requested_discard());
+            output.drop_without_applying_deltas();
         }
 
         // A single call, with a denied request to discard:
@@ -4438,6 +4424,7 @@ mod test {
                     .reason,
                 "test"
             );
+            output.drop_without_applying_deltas();
         }
     }
 
@@ -4458,6 +4445,7 @@ mod test {
             assert_eq!(num_calls, 1);
             assert_eq!(output.platform_output.num_completed_passes, 1);
             assert!(!output.platform_output.requested_discard());
+            output.drop_without_applying_deltas();
         }
 
         // Request discard once:
@@ -4480,6 +4468,7 @@ mod test {
                 !output.platform_output.requested_discard(),
                 "The request should have been cleared when fulfilled"
             );
+            output.drop_without_applying_deltas();
         }
 
         // Request discard twice:
@@ -4504,6 +4493,7 @@ mod test {
                 output.platform_output.requested_discard(),
                 "The unfulfilled request should be reported"
             );
+            output.drop_without_applying_deltas();
         }
     }
 
@@ -4532,6 +4522,7 @@ mod test {
                 !output.platform_output.requested_discard(),
                 "The request should have been cleared when fulfilled"
             );
+            output.drop_without_applying_deltas();
         }
     }
 }

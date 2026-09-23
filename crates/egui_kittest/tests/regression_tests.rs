@@ -1,5 +1,8 @@
 use egui::accesskit::{self, Role};
-use egui::{Button, ComboBox, Image, Modifiers, Popup, Rect, Vec2, Widget as _};
+use egui::{
+    Align2, Button, ComboBox, FontId, Image, Label, Modifiers, Popup, Pos2, Rect, Stroke,
+    StrokeKind, Vec2, Widget as _, Window,
+};
 #[cfg(all(feature = "wgpu", feature = "snapshot"))]
 use egui_kittest::SnapshotResults;
 use egui_kittest::{Harness, kittest::Queryable as _};
@@ -268,7 +271,7 @@ fn keyboard_submenu_harness() -> Harness<'static, bool> {
         .with_size(Vec2::new(400.0, 240.0))
         .build_ui_state(
             |ui, checked| {
-                egui::Panel::top("menu_bar").show_inside(ui, |ui| {
+                egui::Panel::top("menu_bar").show(ui, |ui| {
                     egui::MenuBar::new().ui(ui, |ui| {
                         ui.menu_button("X", |ui| {
                             ui.menu_button("Y", |ui| {
@@ -453,4 +456,458 @@ pub fn pointer_click_on_open_submenu_button_should_not_close_it() {
         harness.query_by_label("Goal").is_some(),
         "Expected submenu to remain open on repeated pointer click"
     );
+}
+
+/// This test checks if we correctly handle wrapping content proceeding non-wrapping content
+/// during window resize. When the window is resized past non-wrapping content, the wrapping content
+/// above should stay at that non wrapping width and not wrap any further.
+#[test]
+fn window_resize_wraps_to_content_min_width() {
+    let wrap_text = "This label should wrap as the window is narrowed. \
+    It should not shrink smaller than the bottom labels width though.";
+    let non_wrap_text = "This is the bottom non-wrapping label which is wider.";
+
+    let window_title = "resize_wrap_regression";
+    let mut harness = Harness::builder()
+        .with_size(Vec2::new(800.0, 600.0))
+        .build_ui(move |ui| {
+            Window::new(window_title)
+                .default_pos([20.0, 20.0])
+                .default_size([400.0, 200.0])
+                .show(ui.ctx(), |ui| {
+                    ui.add(Label::new(wrap_text).wrap());
+                    ui.add(Label::new(non_wrap_text).extend());
+                });
+        });
+
+    harness.run();
+
+    let window_rect = harness
+        .get_by_role_and_label(Role::Window, window_title)
+        .rect();
+
+    // Drag the right edge inward, well past the non-wrapping label's natural
+    // width, so the non-wrapping label pins the window's minimum width while
+    // the wrapping label would (without the fix) keep shrinking.
+    let grab = Pos2::new(window_rect.right(), window_rect.center().y);
+    let target = Pos2::new(window_rect.left() + 80.0, window_rect.center().y);
+
+    harness.drag_at(grab);
+    harness.run();
+    harness.hover_at(target);
+
+    harness.run();
+
+    let wrap_width = harness.get_by_label(wrap_text).rect().width();
+    let non_wrap_width = harness.get_by_label(non_wrap_text).rect().width();
+
+    // Wrapped text won't perfectly fill the available width — each line ends
+    // wherever the next word stops fitting. The tolerance absorbs that
+    // word-break slack while still catching the bug, where the wrap label
+    // would be substantially narrower than the non-wrapping label.
+    assert!(
+        non_wrap_width - wrap_width < 40.0,
+        "wrapping label width ({wrap_width}) is much narrower than the \
+         non-wrapping label width ({non_wrap_width}) after shrinking the \
+         window past the non-wrapping label's natural width"
+    );
+}
+
+/// A `Grid` gives its last column all the available width, so a width-filling widget in it
+/// (here a `Separator`) makes the grid remember a column width that is really just
+/// "however wide the window happened to be".
+///
+/// When `Resize` then measures the minimum content width in a sizing pass, that remembered
+/// width must not be reported as the minimum — otherwise the window can be widened but
+/// never shrunk again.
+#[test]
+fn window_with_grid_can_shrink_after_being_widened() {
+    let window_title = "grid_shrink_regression";
+    let mut harness = Harness::builder()
+        .with_size(Vec2::new(800.0, 600.0))
+        .build_ui(move |ui| {
+            Window::new(window_title)
+                .default_pos([20.0, 20.0])
+                .default_width(280.0)
+                .show(ui.ctx(), |ui| {
+                    egui::Grid::new("grid").num_columns(2).show(ui, |ui| {
+                        ui.label("Separator");
+                        ui.separator(); // Fills the available width
+                        ui.end_row();
+                    });
+                });
+        });
+    harness.run();
+
+    let drag_right_edge = |harness: &mut Harness<'_>, dx: f32| {
+        let rect = harness
+            .get_by_role_and_label(Role::Window, window_title)
+            .rect();
+        let grab = Pos2::new(rect.right(), rect.center().y);
+        harness.hover_at(grab);
+        harness.run();
+        harness.drag_at(grab);
+        harness.run();
+        harness.hover_at(grab + Vec2::new(dx, 0.0));
+        harness.run();
+        harness.drop_at(grab + Vec2::new(dx, 0.0));
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Window, window_title)
+            .rect()
+            .width()
+    };
+
+    let widened = drag_right_edge(&mut harness, 300.0);
+    let shrunk = drag_right_edge(&mut harness, -300.0);
+
+    assert!(
+        shrunk < widened - 200.0,
+        "window could not be shrunk again after being widened: \
+         widened to {widened}, then only shrunk to {shrunk}"
+    );
+}
+
+/// Ensure that the size passed to window is actually treated as outer size (including
+/// margins and borders).
+#[test]
+fn window_fixed_size_is_outer_size() {
+    use egui::{Color32, Frame, Margin, Pos2, Shape};
+
+    let outer_pos = Pos2::new(50.0, 50.0);
+    let outer_size = Vec2::new(300.0, 200.0);
+    let outer_margin = Margin::same(10);
+    let expected_rect = Rect::from_min_size(outer_pos, outer_size);
+
+    let mut harness = Harness::builder()
+        .with_size(Vec2::new(800.0, 600.0))
+        .build_ui(move |ui| {
+            let frame = Frame::window(ui.style()).outer_margin(outer_margin);
+            Window::new("size_test")
+                .frame(frame)
+                .fixed_pos(outer_pos)
+                .fixed_size(outer_size)
+                .show(ui.ctx(), |ui| {
+                    // Fill the available space so `Resize` doesn't auto-shrink the window
+                    // below the requested fixed size.
+                    ui.allocate_space(ui.available_size());
+                });
+
+            // Paint a debug rect on top of everything that marks the expected outer
+            // window rect. In the snapshot this should line up exactly with the
+            // painted window frame.
+            let painter = ui.ctx().debug_painter();
+            painter.rect_stroke(
+                expected_rect,
+                0.0,
+                Stroke::new(2.0, Color32::RED),
+                StrokeKind::Outside,
+            );
+            painter.text(
+                expected_rect.left_top() + Vec2::new(0.0, -4.0),
+                Align2::LEFT_BOTTOM,
+                "should perfectly match the outer window size/position",
+                FontId::default(),
+                Color32::RED,
+            );
+
+            // Also paint the expected *visible frame* rect (outer rect shrunk by the
+            // frame's outer_margin). In the snapshot this should line up exactly with
+            // the painted window frame.
+            let expected_frame_rect = expected_rect - outer_margin;
+            painter.debug_rect(
+                expected_frame_rect,
+                Color32::GREEN,
+                "should perfectly match the painted window frame",
+            );
+        });
+
+    harness.run();
+
+    #[cfg(all(feature = "wgpu", feature = "snapshot"))]
+    harness.snapshot("window_outer_size");
+
+    fn collect_filled_rect_sizes(shape: &Shape, out: &mut Vec<Vec2>) {
+        match shape {
+            // Skip stroke-only rects (fill == TRANSPARENT), so the debug overlay
+            // doesn't trivially satisfy the size check.
+            Shape::Rect(r) if r.fill != Color32::TRANSPARENT => out.push(r.rect.size()),
+            Shape::Vec(v) => v.iter().for_each(|s| collect_filled_rect_sizes(s, out)),
+            _ => {}
+        }
+    }
+
+    let mut sizes = Vec::new();
+    for clipped in &harness.output().shapes {
+        collect_filled_rect_sizes(&clipped.shape, &mut sizes);
+    }
+
+    // The shape will have the inner size
+    let painted_size = outer_size - outer_margin.sum();
+    let found = sizes
+        .iter()
+        .any(|s| (s.x - painted_size.x).abs() < 0.5 && (s.y - painted_size.y).abs() < 0.5);
+
+    assert!(
+        found,
+        "expected a filled RectShape with size {painted_size:?} (outer size {outer_size:?} \
+         minus outer margin {outer_margin:?}) in the paint output, but no painted rect matched. \
+         Found filled-rect sizes: {sizes:?}"
+    );
+}
+
+/// Regression test for <https://github.com/emilk/egui/issues/8055>:
+/// when content overflows a `Panel`, the returned response (and the panel's
+/// stored size, resize handle, and separator) must stay clamped to the panel's
+/// allowed size — they used to inherit the overflowing content rect.
+#[test]
+fn panel_rect_clamped_when_content_overflows() {
+    use core::cell::RefCell;
+
+    let side_panel_width = 100.0_f32;
+    let top_panel_height = 80.0_f32;
+
+    let side_response: RefCell<Option<egui::Response>> = RefCell::new(None);
+    let top_response: RefCell<Option<egui::Response>> = RefCell::new(None);
+
+    let mut harness = Harness::builder()
+        .with_size(Vec2::new(400.0, 300.0))
+        .build_ui(|ui| {
+            let r = egui::Panel::left("left_panel")
+                .exact_size(side_panel_width)
+                .show(ui, |ui| {
+                    // Allocate way more than the panel — would overflow without the clamp.
+                    ui.allocate_space(Vec2::new(1000.0, 10.0));
+                });
+            *side_response.borrow_mut() = Some(r.response);
+
+            let r = egui::Panel::top("top_panel")
+                .exact_size(top_panel_height)
+                .show(ui, |ui| {
+                    ui.allocate_space(Vec2::new(10.0, 1000.0));
+                });
+            *top_response.borrow_mut() = Some(r.response);
+        });
+
+    harness.run();
+
+    let sr = side_response.borrow();
+    let sr = sr.as_ref().expect("left panel response was captured");
+    assert!(
+        sr.rect.width() <= side_panel_width + 1.0,
+        "left panel rect.width()={} exceeded the configured panel width {side_panel_width}",
+        sr.rect.width()
+    );
+    assert!(
+        sr.interact_rect.width() <= side_panel_width + 1.0,
+        "left panel interact_rect.width()={} exceeded the configured panel width {side_panel_width}",
+        sr.interact_rect.width()
+    );
+
+    let tr = top_response.borrow();
+    let tr = tr.as_ref().expect("top panel response was captured");
+    assert!(
+        tr.rect.height() <= top_panel_height + 1.0,
+        "top panel rect.height()={} exceeded the configured panel height {top_panel_height}",
+        tr.rect.height()
+    );
+    assert!(
+        tr.interact_rect.height() <= top_panel_height + 1.0,
+        "top panel interact_rect.height()={} exceeded the configured panel height {top_panel_height}",
+        tr.interact_rect.height()
+    );
+}
+
+/// Regression test: when an animated panel slides off-screen (collapsing), the
+/// enclosing parent (e.g. a `Window`) must not be grown to include the slid-off
+/// portion of the panel.
+#[test]
+fn collapsing_panel_must_not_grow_enclosing_window() {
+    use core::cell::RefCell;
+
+    let window_rect: RefCell<Option<Rect>> = RefCell::new(None);
+    let is_expanded: RefCell<bool> = RefCell::new(true);
+
+    let mut harness = Harness::builder()
+        .with_size(Vec2::new(800.0, 600.0))
+        .build_ui(|ui| {
+            let resp = egui::Window::new("panels_window")
+                .vscroll(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Panel::bottom("bottom_panel")
+                        .resizable(false)
+                        .min_size(60.0)
+                        .show_collapsible(ui, &mut is_expanded.borrow_mut(), |ui| {
+                            ui.label("bottom content");
+                        });
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        ui.label("central");
+                    });
+                });
+            if let Some(resp) = resp {
+                *window_rect.borrow_mut() = Some(resp.response.rect);
+            }
+        });
+
+    harness.run();
+    let initial = window_rect.borrow().expect("window rect captured");
+
+    // Trigger the collapse animation.
+    *is_expanded.borrow_mut() = false;
+
+    // Step through the animation frames; the window must never grow taller than
+    // its initial height (slid-off panel portion must not push the window out).
+    for i in 0..30 {
+        harness.step();
+        let r = window_rect.borrow().expect("window rect captured");
+        assert!(
+            r.height() <= initial.height() + 0.5,
+            "frame {i}: window grew during panel collapse: initial h={}, now h={}",
+            initial.height(),
+            r.height(),
+        );
+    }
+}
+
+/// The hint text of a `TextEdit` should follow the same alignment as the input
+/// text, instead of always being left-top aligned.
+///
+/// Regression test for <https://github.com/emilk/egui/issues/8309>.
+#[test]
+pub fn textedit_hint_text_should_follow_text_alignment() {
+    let mut input = String::new();
+
+    let mut harness = Harness::builder()
+        .with_size(Vec2::new(200.0, 40.0))
+        .build_ui(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut input)
+                    .hint_text("Hint")
+                    .desired_width(200.0)
+                    .horizontal_align(egui::Align::Center),
+            );
+        });
+    harness.run();
+
+    let text_edit = harness.get_by_role(accesskit::Role::TextInput);
+    let edit_rect = text_edit.rect();
+
+    // Find the hint text shape (the only text shape while the input is empty).
+    let hint_shape = harness
+        .output()
+        .shapes
+        .iter()
+        .find_map(|clipped| {
+            let egui::epaint::Shape::Text(text_shape) = &clipped.shape else {
+                return None;
+            };
+            (text_shape.galley.text() == "Hint").then_some(text_shape)
+        })
+        .expect("hint text shape should be painted");
+
+    let hint_center_x = hint_shape.pos.x + hint_shape.galley.size().x / 2.0;
+    let edit_center_x = edit_rect.center().x;
+
+    assert!(
+        (hint_center_x - edit_center_x).abs() < 1.0,
+        "hint text should be centered in the TextEdit: hint_center_x={hint_center_x}, \
+         edit_center_x={edit_center_x}, edit_rect={edit_rect:?}",
+    );
+}
+
+/// A focused `DragValue` keeps the text the user is editing in memory.
+///
+/// If something else changes the value while the `DragValue` has focus,
+/// that memorized text is stale, and must not be written back to the value.
+///
+/// Regression test for <https://github.com/emilk/egui/issues/8339>.
+#[test]
+pub fn drag_value_should_not_revert_external_changes_while_focused() {
+    let mut harness = Harness::new_ui_state(
+        |ui, value: &mut i32| {
+            ui.add(egui::DragValue::new(value));
+        },
+        0,
+    );
+
+    // Focus the `DragValue`, putting it in text-edit mode.
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+
+    // Something else changes the value while the `DragValue` is focused.
+    *harness.state_mut() = 42;
+    harness.run();
+
+    assert_eq!(harness.state(), &42);
+    let drag_value = harness.get_by_role(accesskit::Role::SpinButton);
+    assert_eq!(drag_value.value(), Some("42".to_owned()));
+
+    // Losing focus must not restore the value the `DragValue` had when it gained focus.
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+
+    assert_eq!(harness.state(), &42);
+}
+
+/// While the user is typing into a `DragValue`, the half-finished text must be kept
+/// between frames, even though it doesn't always parse back to the same text.
+#[test]
+pub fn drag_value_should_keep_text_while_typing() {
+    let mut harness = Harness::new_ui_state(
+        |ui, value: &mut f64| {
+            ui.add(egui::DragValue::new(value));
+        },
+        0.0,
+    );
+
+    // Focus the `DragValue`, putting it in text-edit mode with the old text selected.
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+
+    // Type one character per frame. `"1."` parses to `1`, which is formatted as `"1"`,
+    // so re-reading the text from the value would eat the decimal point.
+    for character in "1.25".chars() {
+        harness
+            .get_by_role(accesskit::Role::SpinButton)
+            .type_text(&character.to_string());
+        harness.run();
+    }
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(harness.state(), &1.25);
+}
+
+/// An integer `DragValue` cannot represent everything the user types into it,
+/// but the text must still survive until the user is done typing.
+#[test]
+pub fn drag_value_should_keep_text_the_value_cannot_represent() {
+    let mut harness = Harness::new_ui_state(
+        |ui, value: &mut i32| {
+            ui.add(egui::DragValue::new(value));
+        },
+        0,
+    );
+
+    // Focus the `DragValue`, putting it in text-edit mode with the old text selected.
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+
+    // `"12.5"` is stored as `12`, which is formatted as `"12"`.
+    harness
+        .get_by_role(accesskit::Role::SpinButton)
+        .type_text("12.5");
+    harness.run();
+
+    // If the text was re-read from the value now, this would append to `"12"`.
+    harness
+        .get_by_role(accesskit::Role::SpinButton)
+        .type_text("9");
+    harness.run();
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(harness.state(), &12, "The text should have been \"12.59\"");
 }

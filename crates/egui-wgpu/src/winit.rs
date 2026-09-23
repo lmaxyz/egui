@@ -3,13 +3,14 @@
 #![expect(clippy::unwrap_used)] // TODO(emilk): avoid unwraps
 #![expect(unsafe_code)]
 
-use crate::{RenderState, SurfaceErrorAction, WgpuConfiguration, renderer};
+use crate::{RenderState, SurfaceConfig, SurfaceErrorAction, WgpuConfiguration, renderer};
 use crate::{
     RendererOptions,
     capture::{CaptureReceiver, CaptureSender, CaptureState, capture_channel},
 };
+use core::num::NonZeroU32;
 use egui::{Context, Event, UserData, ViewportId, ViewportIdMap, ViewportIdSet};
-use std::{num::NonZeroU32, sync::Arc};
+use std::sync::Arc;
 
 struct SurfaceState {
     surface: wgpu::Surface<'static>,
@@ -18,17 +19,7 @@ struct SurfaceState {
     height: u32,
     resizing: bool,
     needs_reconfigure: bool,
-
-    // Set when the previous frame observed `wgpu::CurrentSurfaceTexture::Lost`. Triggers a
-    // full surface recreation at the start of the next frame (see `recreate_surface`).
     needs_recreate: bool,
-
-    // Backport of #8171 for the 0.34.3 patch release: recovering from a `Lost` surface requires
-    // dropping the old surface and creating a fresh one, which needs the window handle. On `main`
-    // the window is passed into `paint_and_update_textures`, but adding that argument here would be
-    // a breaking change to a public method, so for the patch we stash an owned handle instead.
-    // `None` when the surface was created via `set_window_unsafe` (no owned window available).
-    window_for_surface_recreation: Option<Arc<winit::window::Window>>,
 }
 
 /// Everything you need to paint egui with [`wgpu`] on [`winit`].
@@ -38,7 +29,7 @@ struct SurfaceState {
 /// NOTE: all egui viewports share the same painter.
 pub struct Painter {
     context: Context,
-    configuration: WgpuConfiguration,
+    config: WgpuConfiguration,
     options: RendererOptions,
     support_transparent_backbuffer: bool,
     screen_capture_state: Option<CaptureState>,
@@ -69,16 +60,16 @@ impl Painter {
     /// associated.
     pub async fn new(
         context: Context,
-        configuration: WgpuConfiguration,
+        config: WgpuConfiguration,
         support_transparent_backbuffer: bool,
         options: RendererOptions,
     ) -> Self {
         let (capture_tx, capture_rx) = capture_channel();
-        let instance = configuration.wgpu_setup.new_instance().await;
+        let instance = config.wgpu_setup.new_instance().await;
 
         Self {
             context,
-            configuration,
+            config,
             options,
             support_transparent_backbuffer,
             screen_capture_state: None,
@@ -105,9 +96,23 @@ impl Painter {
     fn configure_surface(
         surface_state: &SurfaceState,
         render_state: &RenderState,
-        config: &WgpuConfiguration,
+        config: &SurfaceConfig,
     ) {
         profiling::function_scope!();
+
+        let SurfaceConfig {
+            present_mode,
+            desired_maximum_frame_latency,
+        } = *config;
+
+        // Transaction presentation can hold a drawable during AppKit live resize. Keep the
+        // configured low-latency path normally, but use three Metal drawables while resizing.
+        #[cfg(all(target_os = "macos", feature = "macos-window-resize-jitter-fix"))]
+        let desired_maximum_frame_latency = if surface_state.resizing {
+            Some(desired_maximum_frame_latency.unwrap_or(2).max(2))
+        } else {
+            desired_maximum_frame_latency
+        };
 
         let width = surface_state.width;
         let height = surface_state.height;
@@ -115,7 +120,7 @@ impl Painter {
         let mut surf_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: render_state.target_format,
-            present_mode: config.present_mode,
+            present_mode,
             alpha_mode: surface_state.alpha_mode,
             view_formats: vec![render_state.target_format],
             ..surface_state
@@ -124,13 +129,40 @@ impl Painter {
                 .expect("The surface isn't supported by this adapter")
         };
 
-        if let Some(desired_maximum_frame_latency) = config.desired_maximum_frame_latency {
+        if let Some(desired_maximum_frame_latency) = desired_maximum_frame_latency {
             surf_config.desired_maximum_frame_latency = desired_maximum_frame_latency;
         }
 
         surface_state
             .surface
             .configure(&render_state.device, &surf_config);
+    }
+
+    /// Drop the existing [`wgpu::Surface`] for `viewport_id` and create a fresh one for the
+    /// given window via [`wgpu::Instance::create_surface`], then configure it.
+    ///
+    /// Used to recover from [`wgpu::CurrentSurfaceTexture::Lost`], where reconfiguring the
+    /// existing surface object cannot recover.
+    fn recreate_surface(
+        &mut self,
+        viewport_id: ViewportId,
+        window: &Arc<winit::window::Window>,
+    ) -> Result<(), crate::WgpuError> {
+        profiling::function_scope!();
+
+        let Some(old_state) = self.surfaces.remove(&viewport_id) else {
+            return Ok(());
+        };
+
+        let surface = self.instance.create_surface(Arc::clone(window))?;
+        self.install_surface(
+            surface,
+            viewport_id,
+            old_state.width,
+            old_state.height,
+            old_state.resizing,
+        );
+        Ok(())
     }
 
     /// Updates (or clears) the [`winit::window::Window`] associated with the [`Painter`]
@@ -164,9 +196,8 @@ impl Painter {
         if let Some(window) = window {
             let size = window.inner_size();
             if !self.surfaces.contains_key(&viewport_id) {
-                let surface = self.instance.create_surface(Arc::clone(&window))?;
-                self.add_surface(surface, viewport_id, size, Some(window))
-                    .await?;
+                let surface = self.instance.create_surface(window)?;
+                self.add_surface(surface, viewport_id, size).await?;
             }
         } else {
             log::warn!("No window - clearing all surfaces");
@@ -195,7 +226,7 @@ impl Painter {
                     self.instance
                         .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window)?)?
                 };
-                self.add_surface(surface, viewport_id, size, None).await?;
+                self.add_surface(surface, viewport_id, size).await?;
             }
         } else {
             log::warn!("No window - clearing all surfaces");
@@ -209,32 +240,21 @@ impl Painter {
         surface: wgpu::Surface<'static>,
         viewport_id: ViewportId,
         size: winit::dpi::PhysicalSize<u32>,
-        window_for_surface_recreation: Option<Arc<winit::window::Window>>,
     ) -> Result<(), crate::WgpuError> {
         if self.render_state.is_none() {
-            let render_state = RenderState::create(
-                &self.configuration,
-                &self.instance,
-                Some(&surface),
-                self.options,
-            )
-            .await?;
+            let render_state =
+                RenderState::create(&self.config, &self.instance, Some(&surface), self.options)
+                    .await?;
             self.render_state = Some(render_state);
         }
-        self.install_surface(
-            surface,
-            viewport_id,
-            size.width,
-            size.height,
-            false,
-            window_for_surface_recreation,
-        );
+        self.install_surface(surface, viewport_id, size.width, size.height, false);
         Ok(())
     }
 
     /// Inserts a freshly created surface into [`Self::surfaces`] and configures it.
     ///
     /// Render state must already be initialised before calling this.
+    // NOTE: The same assumption is already required by `resize_and_generate_depth_texture_view_and_msaa_view`.
     fn install_surface(
         &mut self,
         surface: wgpu::Surface<'static>,
@@ -242,9 +262,9 @@ impl Painter {
         width: u32,
         height: u32,
         resizing: bool,
-        window_for_surface_recreation: Option<Arc<winit::window::Window>>,
     ) {
         let alpha_mode = {
+            // Panic: We use the same failure mode as `resize_and_generate_depth_texture_view_and_msaa_view`
             let render_state = self
                 .render_state
                 .as_ref()
@@ -252,7 +272,6 @@ impl Painter {
             if self.support_transparent_backbuffer {
                 let supported_alpha_modes =
                     surface.get_capabilities(&render_state.adapter).alpha_modes;
-
                 // Prefer pre multiplied over post multiplied!
                 if supported_alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
                     wgpu::CompositeAlphaMode::PreMultiplied
@@ -279,7 +298,6 @@ impl Painter {
                 resizing,
                 needs_reconfigure: false,
                 needs_recreate: false,
-                window_for_surface_recreation,
             },
         );
         let Some(width) = NonZeroU32::new(width) else {
@@ -291,34 +309,6 @@ impl Painter {
             return;
         };
         self.resize_and_generate_depth_texture_view_and_msaa_view(viewport_id, width, height);
-    }
-
-    /// Drop the existing [`wgpu::Surface`] for `viewport_id` and create a fresh one for the stored
-    /// window via [`wgpu::Instance::create_surface`], then configure it.
-    ///
-    /// Used to recover from [`wgpu::CurrentSurfaceTexture::Lost`], where reconfiguring the existing
-    /// surface object cannot recover. Backport of #8171 for the 0.34.3 patch release; see the note
-    /// on [`SurfaceState::window_for_surface_recreation`].
-    fn recreate_surface(&mut self, viewport_id: ViewportId) -> Result<(), crate::WgpuError> {
-        profiling::function_scope!();
-
-        let Some(old_state) = self.surfaces.get(&viewport_id) else {
-            return Ok(());
-        };
-        let Some(window) = old_state.window_for_surface_recreation.clone() else {
-            // Surface was created via `set_window_unsafe`; we have no owned window to recreate from.
-            return Ok(());
-        };
-        let width = old_state.width;
-        let height = old_state.height;
-        let resizing = old_state.resizing;
-
-        // Drop the old surface before creating the new one.
-        self.surfaces.remove(&viewport_id);
-
-        let surface = self.instance.create_surface(Arc::clone(&window))?;
-        self.install_surface(surface, viewport_id, width, height, resizing, Some(window));
-        Ok(())
     }
 
     /// Returns the maximum texture dimension supported if known
@@ -349,7 +339,7 @@ impl Painter {
         surface_state.width = width;
         surface_state.height = height;
 
-        Self::configure_surface(surface_state, render_state, &self.configuration);
+        Self::configure_surface(surface_state, render_state, &self.config.surface);
 
         if let Some(depth_format) = self.options.depth_stencil_format {
             self.depth_texture_view.insert(
@@ -426,6 +416,9 @@ impl Painter {
             return;
         }
 
+        // Set before reconfiguring so macOS live resize uses the temporary latency bump above.
+        state.resizing = resizing;
+
         // Resizing is a bit tricky on macOS.
         // It requires enabling ["present_with_transaction"](https://developer.apple.com/documentation/quartzcore/cametallayer/presentswithtransaction)
         // flag to avoid jittering during the resize. Even though resize jittering on macOS
@@ -434,25 +427,22 @@ impl Painter {
         // See https://github.com/emilk/egui/issues/903
         #[cfg(all(target_os = "macos", feature = "macos-window-resize-jitter-fix"))]
         {
-            // SAFETY: The cast is checked with if condition. If the used backend is not metal
-            // it gracefully fails.
+            // SAFETY: `as_hal::<Metal>()` returns `None` unless this surface is backed by wgpu's
+            // Metal backend.
             unsafe {
-                if let Some(hal_surface) = state.surface.as_hal::<wgpu::hal::api::Metal>() {
+                if let (Some(render_state), Some(hal_surface)) = (
+                    self.render_state.as_ref(),
+                    state.surface.as_hal::<wgpu::hal::api::Metal>(),
+                ) {
                     hal_surface
                         .render_layer()
                         .lock()
                         .setPresentsWithTransaction(resizing);
 
-                    Self::configure_surface(
-                        state,
-                        self.render_state.as_ref().unwrap(),
-                        &self.configuration,
-                    );
+                    Self::configure_surface(state, render_state, &self.config.surface);
                 }
             }
         }
-
-        state.resizing = resizing;
     }
 
     pub fn on_window_resized(
@@ -482,14 +472,16 @@ impl Painter {
     /// and the captures captured screenshot if it was requested.
     ///
     /// If `capture_data` isn't empty, a screenshot will be captured.
+    #[expect(clippy::too_many_arguments)]
     pub fn paint_and_update_textures(
         &mut self,
         viewport_id: ViewportId,
         pixels_per_point: f32,
         clear_color: [f32; 4],
         clipped_primitives: &[epaint::ClippedPrimitive],
-        textures_delta: &epaint::textures::TexturesDelta,
+        textures_delta: &mut epaint::textures::TexturesDelta,
         capture_data: Vec<UserData>,
+        window: &Arc<winit::window::Window>,
     ) -> f32 {
         profiling::function_scope!();
 
@@ -518,17 +510,31 @@ impl Painter {
         let capture = !capture_data.is_empty();
         let mut vsync_sec = 0.0;
 
-        // If the previous frame produced `CurrentSurfaceTexture::Lost`, the match below set
-        // `needs_recreate`. Recreate the surface now, before borrowing `render_state` / `surfaces`
-        // for the rest of the paint (see #8171).
+        // If the previous frame produced `CurrentSurfaceTexture::Lost`, the action match
+        // below set `needs_recreate`. Recreate the surface now, before re-borrowing
+        // `self.render_state` / `self.surfaces` for the rest of the paint.
         if self
             .surfaces
             .get(&viewport_id)
             .is_some_and(|s| s.needs_recreate)
-            && let Err(err) = self.recreate_surface(viewport_id)
+            && let Err(err) = self.recreate_surface(viewport_id, window)
         {
             log::error!("Failed to recreate surface for {viewport_id:?}: {err}");
             return vsync_sec;
+        }
+
+        // Apply any runtime changes requested via `RenderState::surface_config`.
+        // We diff against the already-applied values in `self.config.surface`
+        // and, if anything differs, mark every surface as needing reconfiguration so
+        // the existing `needs_reconfigure` pathway below picks them up.
+        if let Some(render_state) = self.render_state.as_ref()
+            && render_state.surface_config != self.config.surface
+        {
+            self.config.surface = render_state.surface_config;
+            #[expect(clippy::iter_over_hash_type)]
+            for surface in self.surfaces.values_mut() {
+                surface.needs_reconfigure = true;
+            }
         }
 
         let Some(render_state) = self.render_state.as_mut() else {
@@ -559,13 +565,16 @@ impl Painter {
 
         let user_cmd_bufs = {
             let mut renderer = render_state.renderer.write();
-            for (id, image_delta) in &textures_delta.set {
-                renderer.update_texture(
-                    &render_state.device,
-                    &render_state.queue,
-                    *id,
-                    image_delta,
-                );
+            #[expect(clippy::iter_over_hash_type)] // Order doesn't matter here
+            for (id, image_deltas) in textures_delta.set.drain() {
+                for image_delta in image_deltas {
+                    renderer.update_texture(
+                        &render_state.device,
+                        &render_state.queue,
+                        id,
+                        &image_delta,
+                    );
+                }
             }
 
             renderer.update_buffers(
@@ -578,7 +587,7 @@ impl Painter {
         };
 
         if surface_state.needs_reconfigure {
-            Self::configure_surface(surface_state, render_state, &self.configuration);
+            Self::configure_surface(surface_state, render_state, &self.config.surface);
             surface_state.needs_reconfigure = false;
         }
 
@@ -598,23 +607,18 @@ impl Painter {
                 frame
             }
             other => {
-                match (*self.configuration.on_surface_status)(&other) {
+                match (*self.config.on_surface_status)(&other) {
+                    SurfaceErrorAction::Reconfigure => {
+                        Self::configure_surface(surface_state, render_state, &self.config.surface);
+                        self.context.request_repaint_of(viewport_id);
+                    }
                     SurfaceErrorAction::RecreateSurface => {
-                        if matches!(other, wgpu::CurrentSurfaceTexture::Lost) {
-                            // The surface is gone; reconfiguring the same object cannot recover.
-                            // We can't drop & recreate it here while `surface_state` /
-                            // `render_state` are borrowed, so defer it to the start of the next
-                            // frame (which we ensure arrives via `request_repaint_of`). See #8171.
-                            surface_state.needs_recreate = true;
-                        } else {
-                            // `Outdated` (and other recoverable statuses): reconfiguring the
-                            // existing surface is enough.
-                            Self::configure_surface(
-                                surface_state,
-                                render_state,
-                                &self.configuration,
-                            );
-                        }
+                        // Because of ownership, I could not find an easy way to do a full recovery here,
+                        // as that would involve dropping the old surface and creating a new one.
+                        // For now, we defer the recreation to the beginning of the next frame (which
+                        // we ensure to arrive via `request_repaint_of`). A cleaner solution would be
+                        // to untangle the ownership of `RenderState`.
+                        surface_state.needs_recreate = true;
                         self.context.request_repaint_of(viewport_id);
                     }
                     SurfaceErrorAction::SkipFrame => {}
@@ -724,7 +728,7 @@ impl Painter {
             let start = web_time::Instant::now();
             render_state
                 .queue
-                .submit(user_cmd_bufs.into_iter().chain([encoded]));
+                .submit(core::iter::chain(user_cmd_bufs, [encoded]));
             vsync_sec += start.elapsed().as_secs_f32();
         };
 
@@ -736,8 +740,9 @@ impl Painter {
         // However, once we called `wgpu::Queue::submit`, it is up for wgpu to determine how long the underlying gpu resource has to live.
         {
             let mut renderer = render_state.renderer.write();
-            for id in &textures_delta.free {
-                renderer.free_texture(id);
+            #[expect(clippy::iter_over_hash_type)] // Order doesn't matter here
+            for id in textures_delta.free.drain() {
+                renderer.free_texture(&id);
             }
         }
 
@@ -753,11 +758,13 @@ impl Painter {
             );
         }
 
+        window.pre_present_notify();
+
         {
             profiling::scope!("present");
             // wgpu doesn't document where vsync can happen. Maybe here?
             let start = web_time::Instant::now();
-            output_frame.present();
+            render_state.queue.present(output_frame);
             vsync_sec += start.elapsed().as_secs_f32();
         }
 

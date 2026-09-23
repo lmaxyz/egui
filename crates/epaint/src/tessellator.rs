@@ -5,7 +5,9 @@
 
 #![expect(clippy::identity_op)]
 
-use emath::{GuiRounding as _, NumExt as _, Pos2, Rect, Rot2, Vec2, pos2, remap, vec2};
+use emath::{
+    GuiRounding as _, NumExt as _, Pos2, Rect, Rot2, Vec2, fast_midpoint, pos2, remap, vec2,
+};
 
 use crate::{
     CircleShape, ClippedPrimitive, ClippedShape, Color32, CornerRadiusF32, CubicBezierShape,
@@ -1074,7 +1076,7 @@ fn stroke_and_fill_path(
             */
 
             let inner_rad = 0.5 * (stroke.width - feathering);
-            let outer_rad = 0.5 * (stroke.width + feathering);
+            let outer_rad = fast_midpoint(stroke.width, feathering);
 
             match path_type {
                 PathType::Closed => {
@@ -1577,7 +1579,7 @@ impl Tessellator {
                 let eased = 2.0 * (percent - percent.powf(2.0)) * ratio + percent.powf(2.0);
 
                 // Scale the ease to the quarter
-                let t = eased * std::f32::consts::FRAC_PI_2;
+                let t = eased * core::f32::consts::FRAC_PI_2;
                 Vec2::new(radius.x * f32::cos(t), radius.y * f32::sin(t))
             })
             .collect();
@@ -1703,16 +1705,6 @@ impl Tessellator {
             .stroke_open(self.feathering, &stroke.into(), out);
     }
 
-    #[deprecated = "Use `tessellate_line_segment` instead"]
-    pub fn tessellate_line(
-        &mut self,
-        points: [Pos2; 2],
-        stroke: impl Into<Stroke>,
-        out: &mut Mesh,
-    ) {
-        self.tessellate_line_segment(points, stroke, out);
-    }
-
     /// Tessellate a single [`PathShape`] into a [`Mesh`].
     ///
     /// * `path_shape`: the path to tessellate.
@@ -1815,7 +1807,7 @@ impl Tessellator {
             }
         }
 
-        if stroke.is_empty() && out.texture_id == TextureId::default() {
+        if angle == 0.0 && stroke.is_empty() && out.texture_id == TextureId::default() {
             // Approximate thin rectangles with line segments.
             // This is important so that thin rectangles look good.
             if rect.width() <= 2.0 * self.feathering {

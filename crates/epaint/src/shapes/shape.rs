@@ -73,12 +73,12 @@ pub enum Shape {
 #[test]
 fn shape_size() {
     assert_eq!(
-        std::mem::size_of::<Shape>(),
+        core::mem::size_of::<Shape>(),
         64,
         "Shape changed size! If it shrank - good! Update this test. If it grew - bad! Try to find a way to avoid it."
     );
     assert!(
-        std::mem::size_of::<Shape>() <= 64,
+        core::mem::size_of::<Shape>() <= 64,
         "Shape is getting way too big!"
     );
 }
@@ -358,12 +358,6 @@ impl Shape {
     }
 
     #[inline]
-    #[deprecated = "Use `Shape::galley` or `Shape::galley_with_override_text_color` instead"]
-    pub fn galley_with_color(pos: Pos2, galley: Arc<Galley>, text_color: Color32) -> Self {
-        Self::galley_with_override_text_color(pos, galley, text_color)
-    }
-
-    #[inline]
     pub fn mesh(mesh: impl Into<Arc<Mesh>>) -> Self {
         let mesh = mesh.into();
         debug_assert!(mesh.is_valid(), "Invalid mesh: {mesh:#?}");
@@ -518,8 +512,7 @@ fn points_from_line(
     shapes: &mut Vec<Shape>,
 ) {
     let mut position_on_segment = 0.0;
-    for window in path.windows(2) {
-        let (start, end) = (window[0], window[1]);
+    for &[start, end] in path.array_windows() {
         let vector = end - start;
         let segment_length = vector.length();
         while position_on_segment < segment_length {
@@ -551,8 +544,7 @@ fn dashes_from_line(
     let mut drawing_dash = false;
     let mut step = 0;
     let steps = dash_lengths.len();
-    for window in path.windows(2) {
-        let (start, end) = (window[0], window[1]);
+    for &[start, end] in path.array_windows() {
         let vector = end - start;
         let segment_length = vector.length();
 

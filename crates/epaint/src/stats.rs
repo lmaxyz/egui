@@ -26,7 +26,7 @@ impl<T> From<&[T]> for AllocInfo {
     }
 }
 
-impl std::ops::Add for AllocInfo {
+impl core::ops::Add for AllocInfo {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self {
@@ -47,13 +47,13 @@ impl std::ops::Add for AllocInfo {
     }
 }
 
-impl std::ops::AddAssign for AllocInfo {
+impl core::ops::AddAssign for AllocInfo {
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs;
     }
 }
 
-impl std::iter::Sum for AllocInfo {
+impl core::iter::Sum for AllocInfo {
     fn sum<I>(iter: I) -> Self
     where
         I: Iterator<Item = Self>,
@@ -95,13 +95,13 @@ impl AllocInfo {
     }
 
     pub fn from_slice<T>(slice: &[T]) -> Self {
-        use std::mem::size_of;
+        use core::mem::size_of;
         let element_size = size_of::<T>();
         Self {
             element_size: ElementSize::Homogeneous(element_size),
             num_allocs: 1,
             num_elements: slice.len(),
-            num_bytes: std::mem::size_of_val(slice),
+            num_bytes: core::mem::size_of_val(slice),
         }
     }
 
@@ -135,10 +135,10 @@ impl AllocInfo {
                 what,
                 self.megabytes()
             )
-        } else if self.element_size != ElementSize::Heterogenous {
+        } else if self.element_size == ElementSize::Heterogenous {
             format!(
                 "{:6} {:16}  {}     {:3} allocations",
-                self.num_elements(),
+                "",
                 what,
                 self.megabytes(),
                 self.num_allocs()
@@ -146,7 +146,7 @@ impl AllocInfo {
         } else {
             format!(
                 "{:6} {:16}  {}     {:3} allocations",
-                "",
+                self.num_elements(),
                 what,
                 self.megabytes(),
                 self.num_allocs()

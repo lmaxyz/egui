@@ -3,8 +3,8 @@ use crate::{
     Modifiers, NumExt as _, Response, RichText, Sense, TextEdit, TextWrapMode, Ui, Widget,
     WidgetInfo, emath, text,
 };
+use core::{cmp::Ordering, ops::RangeInclusive};
 use emath::Vec2;
-use std::{cmp::Ordering, ops::RangeInclusive};
 
 // ----------------------------------------------------------------------------
 
@@ -23,6 +23,24 @@ fn get(get_set_value: &mut GetSetValue<'_>) -> f64 {
 
 fn set(get_set_value: &mut GetSetValue<'_>, value: f64) {
     (get_set_value)(Some(value));
+}
+
+// ----------------------------------------------------------------------------
+
+/// What the user has typed into a [`DragValue`] that is being edited as text.
+///
+/// Stored in [`crate::Memory::data`] between frames, because the text can be
+/// something that doesn't (yet) parse to a number, e.g. `"1."` or `"-"`.
+#[derive(Clone, Default)]
+struct EditState {
+    /// The text the user is editing.
+    text: String,
+
+    /// The value of the [`DragValue`] the last time we stored `text`.
+    ///
+    /// If the value has changed since then it was changed by something other than
+    /// this widget, and `text` is stale and must not be written back to the value.
+    value: f64,
 }
 
 /// A numeric value that you can change by dragging the number. More compact than a [`crate::Slider`].
@@ -91,16 +109,6 @@ impl<'a> DragValue<'a> {
         self
     }
 
-    /// Sets valid range for the value.
-    ///
-    /// By default all values are clamped to this range, even when not interacted with.
-    /// You can change this behavior by passing `false` to [`Self::clamp_existing_to_range`].
-    #[deprecated = "Use `range` instead"]
-    #[inline]
-    pub fn clamp_range<Num: emath::Numeric>(self, range: RangeInclusive<Num>) -> Self {
-        self.range(range)
-    }
-
     /// Sets valid range for dragging the value.
     ///
     /// By default all values are clamped to this range, even when not interacted with.
@@ -155,12 +163,6 @@ impl<'a> DragValue<'a> {
     pub fn clamp_existing_to_range(mut self, clamp_existing_to_range: bool) -> Self {
         self.clamp_existing_to_range = clamp_existing_to_range;
         self
-    }
-
-    #[inline]
-    #[deprecated = "Renamed clamp_existing_to_range"]
-    pub fn clamp_to_range(self, clamp_to_range: bool) -> Self {
-        self.clamp_existing_to_range(clamp_to_range)
     }
 
     /// Show a prefix before the number, e.g. "x: "
@@ -425,6 +427,13 @@ impl<'a> DragValue<'a> {
         self.update_while_editing = update;
         self
     }
+
+    /// Output the [`DragValue`]'s [`Atoms`].
+    ///
+    /// This includes any images you have on the [`DragValue`].
+    pub fn atoms(&self) -> &Atoms<'a> {
+        &self.atoms
+    }
 }
 
 impl Widget for DragValue<'_> {
@@ -475,7 +484,7 @@ impl Widget for DragValue<'_> {
             });
 
         if ui.memory_mut(|mem| mem.gained_focus(id)) {
-            ui.data_mut(|data| data.remove::<String>(id));
+            ui.data_mut(|data| data.remove::<EditState>(id));
         }
 
         let old_value = get(&mut get_set_value);
@@ -533,7 +542,7 @@ impl Widget for DragValue<'_> {
 
         if old_value != value {
             set(&mut get_set_value, value);
-            ui.data_mut(|data| data.remove::<String>(id));
+            ui.data_mut(|data| data.remove::<EditState>(id));
         }
 
         let value_text = match custom_formatter {
@@ -547,11 +556,16 @@ impl Widget for DragValue<'_> {
         let text_style = ui.style().drag_value_text_style.clone();
 
         if ui.memory(|mem| mem.lost_focus(id)) && !ui.input(|i| i.key_pressed(Key::Escape)) {
-            let value_text = ui.data_mut(|data| data.remove_temp::<String>(id));
-            if let Some(value_text) = value_text {
+            let edit_state = ui.data_mut(|data| data.remove_temp::<EditState>(id));
+            // Ignore the text if the value was changed by something else while we were editing it,
+            // or we would revert that change.
+            if let Some(value_text) = edit_state
+                .filter(|edit_state| edit_state.value == old_value)
+                .map(|edit_state| edit_state.text)
+            {
                 // We were editing the value as text last frame, but lost focus.
                 // Make sure we applied the last text value:
-                let parsed_value = parse(&custom_parser, &value_text);
+                let parsed_value = parse(custom_parser.as_ref(), &value_text);
                 if let Some(mut parsed_value) = parsed_value {
                     // User edits always clamps:
                     parsed_value = clamp_value_to_range(parsed_value, range.clone());
@@ -561,9 +575,12 @@ impl Widget for DragValue<'_> {
         }
 
         let mut response = if is_kb_editing {
+            // Keep editing the text from last frame, unless the value was changed by
+            // something else in the meantime, in which case the text is stale.
             let mut value_text = ui
-                .data_mut(|data| data.remove_temp::<String>(id))
-                .unwrap_or_else(|| value_text.clone());
+                .data_mut(|data| data.remove_temp::<EditState>(id))
+                .filter(|edit_state| edit_state.value == old_value)
+                .map_or_else(|| value_text.clone(), |edit_state| edit_state.text);
             let response = ui.add(
                 TextEdit::singleline(&mut value_text)
                     .clip_text(false)
@@ -591,14 +608,20 @@ impl Widget for DragValue<'_> {
                 response.lost_focus() && !ui.input(|i| i.key_pressed(Key::Escape))
             };
             if update {
-                let parsed_value = parse(&custom_parser, &value_text);
+                let parsed_value = parse(custom_parser.as_ref(), &value_text);
                 if let Some(mut parsed_value) = parsed_value {
                     // User edits always clamps:
                     parsed_value = clamp_value_to_range(parsed_value, range.clone());
                     set(&mut get_set_value, parsed_value);
                 }
             }
-            ui.data_mut(|data| data.insert_temp(id, value_text));
+            // Remember the value the text belongs to, so that next frame we can tell
+            // whether the value was changed by us or by something else.
+            let edit_state = EditState {
+                text: value_text,
+                value: get(&mut get_set_value),
+            };
+            ui.data_mut(|data| data.insert_temp(id, edit_state));
             response
         } else {
             atoms.map_atoms(|atom| {
@@ -640,7 +663,7 @@ impl Widget for DragValue<'_> {
             }
 
             if response.clicked() {
-                ui.data_mut(|data| data.remove::<String>(id));
+                ui.data_mut(|data| data.remove::<EditState>(id));
                 ui.memory_mut(|mem| mem.request_focus(id));
                 select_all_text(ui, id, response.id, &value_text);
             } else if response.dragged() {
@@ -733,8 +756,8 @@ impl Widget for DragValue<'_> {
     }
 }
 
-fn parse(custom_parser: &Option<NumParser<'_>>, value_text: &str) -> Option<f64> {
-    match &custom_parser {
+fn parse(custom_parser: Option<&NumParser<'_>>, value_text: &str) -> Option<f64> {
+    match custom_parser {
         Some(parser) => parser(value_text),
         None => default_parser(value_text),
     }
@@ -789,7 +812,7 @@ mod tests {
     macro_rules! total_assert_eq {
         ($a:expr, $b:expr) => {
             assert!(
-                matches!($a.total_cmp(&$b), std::cmp::Ordering::Equal),
+                matches!($a.total_cmp(&$b), core::cmp::Ordering::Equal),
                 "{} != {}",
                 $a,
                 $b

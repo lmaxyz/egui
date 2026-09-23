@@ -11,7 +11,7 @@
 use eframe::egui;
 use eframe::glow;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn core::error::Error>> {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -30,7 +30,7 @@ struct MyTestApp {}
 
 impl eframe::App for MyTestApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        egui::Panel::top("top").show_inside(ui, |ui| {
+        egui::Panel::top("top").show(ui, |ui| {
             ui.label("This is a test of painting directly with glow.");
         });
 

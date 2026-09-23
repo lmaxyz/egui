@@ -514,9 +514,9 @@ struct HighlightSettings<'a>(&'a SyntectSettings);
 #[derive(Copy, Clone)]
 struct HighlightSettings<'a>(&'a ());
 
-impl std::hash::Hash for HighlightSettings<'_> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(self.0, state);
+impl core::hash::Hash for HighlightSettings<'_> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        core::ptr::hash(self.0, state);
     }
 }
 
@@ -604,7 +604,8 @@ impl Highlighter {
 }
 
 #[cfg(feature = "syntect")]
-fn as_byte_range(whole: &str, range: &str) -> std::ops::Range<usize> {
+fn as_byte_range(whole: &str, range: &str) -> egui::text::ByteRange {
+    use egui::text::ByteIndex;
     let whole_start = whole.as_ptr() as usize;
     let range_start = range.as_ptr() as usize;
     assert!(
@@ -617,7 +618,7 @@ fn as_byte_range(whole: &str, range: &str) -> std::ops::Range<usize> {
         range_start + range.len()
     );
     let offset = range_start - whole_start;
-    offset..(offset + range.len())
+    ByteIndex(offset)..ByteIndex(offset + range.len())
 }
 
 // ----------------------------------------------------------------------------

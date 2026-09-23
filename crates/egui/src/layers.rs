@@ -1,7 +1,7 @@
 //! Handles paint layers, i.e. how things
 //! are sometimes painted behind or in front of other things.
 
-use crate::{Id, IdMap, Rect, ahash, epaint};
+use crate::{Id, IdMap, Rect, epaint};
 use epaint::{ClippedShape, Shape, emath::TSTransform};
 
 /// Different layer categories
@@ -86,12 +86,6 @@ impl LayerId {
         }
     }
 
-    #[inline(always)]
-    #[deprecated = "Use `Memory::allows_interaction` instead"]
-    pub fn allow_interaction(&self) -> bool {
-        self.order.allow_interaction()
-    }
-
     /// Short and readable summary
     pub fn short_debug_format(&self) -> String {
         format!(
@@ -102,8 +96,8 @@ impl LayerId {
     }
 }
 
-impl std::fmt::Debug for LayerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for LayerId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let Self { order, id } = self;
         write!(f, "LayerId {{ {order:?} {id:?} }}")
     }

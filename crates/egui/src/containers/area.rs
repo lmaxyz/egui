@@ -280,7 +280,7 @@ impl Area {
         self
     }
 
-    /// Constrains this area to [`Context::screen_rect`]?
+    /// Constrains this area to [`Context::content_rect`]?
     ///
     /// Default: `true`.
     #[inline]
@@ -291,7 +291,7 @@ impl Area {
 
     /// Constrain the movement of the window to the given rectangle.
     ///
-    /// For instance: `.constrain_to(ctx.screen_rect())`.
+    /// For instance: `.constrain_to(ctx.content_rect())`.
     #[inline]
     pub fn constrain_to(mut self, constrain_rect: Rect) -> Self {
         self.constrain = true;
@@ -454,14 +454,12 @@ impl Area {
             state.size = None;
         }
         state.pivot = pivot;
-        state.interactable = interactable;
         if let Some(new_pos) = new_pos {
             state.pivot_pos = Some(new_pos);
         }
         state.pivot_pos.get_or_insert_with(|| {
             default_pos.unwrap_or_else(|| automatic_area_position(ctx, constrain_rect, layer_id))
         });
-        state.interactable = interactable;
 
         let size = *state.size.get_or_insert_with(|| {
             sizing_pass = true;
@@ -483,6 +481,10 @@ impl Area {
 
             size
         });
+
+        // We should never be interactable during a sizing pass, since then we are shown at a different
+        // size which might interfere with hover state of the hovered widget causing popup feedback loops.
+        state.interactable = interactable && !sizing_pass;
 
         // TODO(emilk): if last frame was sizing pass, it should be considered invisible for smoother fade-in
         let visible_last_frame = ctx.memory(|mem| mem.areas().visible_last_frame(&layer_id));
@@ -583,7 +585,7 @@ impl Area {
     }
 }
 
-fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {
+pub(crate) fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {
     // We round a lot of rendering to pixels, so we round the whole
     // area positions to pixels too, so avoid widgets appearing to float
     // around independently of each other when the area is dragged.
@@ -594,10 +596,6 @@ fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {
 }
 
 impl Prepared {
-    pub(crate) fn state(&self) -> &AreaState {
-        &self.state
-    }
-
     pub(crate) fn state_mut(&mut self) -> &mut AreaState {
         &mut self.state
     }

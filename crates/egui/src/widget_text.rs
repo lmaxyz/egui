@@ -1,6 +1,5 @@
-use emath::GuiRounding as _;
+use core::fmt::Formatter;
 use epaint::text::{IntoTag, TextFormat, VariationCoords};
-use std::fmt::Formatter;
 use std::{borrow::Cow, sync::Arc};
 
 use crate::{
@@ -156,7 +155,7 @@ impl RichText {
     /// Default: 0.0.
     ///
     /// For even text it is recommended you round this to an even number of _pixels_,
-    /// e.g. using [`crate::Painter::round_to_pixel`].
+    /// e.g. using [`emath::GuiRounding`].
     #[inline]
     pub fn extra_letter_spacing(mut self, extra_letter_spacing: f32) -> Self {
         self.extra_letter_spacing = extra_letter_spacing;
@@ -170,7 +169,7 @@ impl RichText {
     /// If `None` (the default), the line height is determined by the font.
     ///
     /// For even text it is recommended you round this to an even number of _pixels_,
-    /// e.g. using [`crate::Painter::round_to_pixel`].
+    /// e.g. using [`emath::GuiRounding`].
     #[inline]
     pub fn line_height(mut self, line_height: Option<f32>) -> Self {
         self.line_height = line_height;
@@ -540,8 +539,8 @@ pub enum WidgetText {
     Galley(Arc<Galley>),
 }
 
-impl std::fmt::Debug for WidgetText {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for WidgetText {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let text = self.text();
         match self {
             Self::Text(_) => write!(f, "Text({text:?})"),
@@ -559,6 +558,25 @@ impl Default for WidgetText {
 }
 
 impl WidgetText {
+    /// Override the font size.
+    ///
+    /// For [`Self::Galley`], this does nothing because it has already been laid out.
+    #[must_use]
+    pub fn size(self, size: f32) -> Self {
+        match self {
+            Self::Text(text) => RichText::new(text).size(size).into(),
+            Self::RichText(text) => Self::RichText(Arc::new(Arc::unwrap_or_clone(text).size(size))),
+            Self::LayoutJob(job) => {
+                let mut job = Arc::unwrap_or_clone(job);
+                for section in &mut job.sections {
+                    section.format.font_id.size = size;
+                }
+                Self::LayoutJob(Arc::new(job))
+            }
+            Self::Galley(galley) => Self::Galley(galley),
+        }
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         match self {
@@ -692,22 +710,6 @@ impl WidgetText {
         self.map_rich_text(|text| text.background_color(background_color))
     }
 
-    /// Returns a value rounded to [`emath::GUI_ROUNDING`].
-    pub(crate) fn font_height(&self, fonts: &mut epaint::FontsView<'_>, style: &Style) -> f32 {
-        match self {
-            Self::Text(_) => fonts.row_height(&FontSelection::Default.resolve(style)),
-            Self::RichText(text) => text.font_height(fonts, style),
-            Self::LayoutJob(job) => job.font_height(fonts),
-            Self::Galley(galley) => {
-                if let Some(placed_row) = galley.rows.first() {
-                    placed_row.height().round_ui()
-                } else {
-                    galley.size().y.round_ui()
-                }
-            }
-        }
-    }
-
     pub fn into_layout_job(
         self,
         style: &Style,
@@ -767,14 +769,19 @@ impl WidgetText {
                     .visuals
                     .override_text_color
                     .unwrap_or(crate::Color32::PLACEHOLDER);
+
+                // We want the style overrides to take precedence over the fallback font
+                let font_id = FontSelection::default().resolve_with_fallback(style, fallback_font);
+                let line_height = ctx
+                    .fonts_mut(|f| f.row_height(&font_id) + style.spacing.extra_text_line_spacing);
+
                 let mut layout_job = LayoutJob::simple_format(
                     text,
                     TextFormat {
-                        // We want the style overrides to take precedence over the fallback font
-                        font_id: FontSelection::default()
-                            .resolve_with_fallback(style, fallback_font),
+                        font_id,
                         color,
                         valign: default_valign,
+                        line_height: Some(line_height),
                         ..Default::default()
                     },
                 );

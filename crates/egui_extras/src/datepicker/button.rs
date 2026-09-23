@@ -1,7 +1,7 @@
 use super::popup::DatePickerPopup;
+use core::ops::RangeInclusive;
 use egui::{Area, Button, Frame, InnerResponse, Key, Order, RichText, Ui, Widget};
 use jiff::civil::Date;
-use std::ops::RangeInclusive;
 
 #[derive(Default, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -49,14 +49,6 @@ impl<'a> DatePickerButton<'a> {
     pub fn id_salt(mut self, id_salt: &'a str) -> Self {
         self.id_salt = Some(id_salt);
         self
-    }
-
-    /// Add id source.
-    /// Must be set if multiple date picker buttons are in the same Ui.
-    #[inline]
-    #[deprecated = "Renamed id_salt"]
-    pub fn id_source(self, id_salt: &'a str) -> Self {
-        self.id_salt(id_salt)
     }
 
     /// Show combo boxes in date picker popup. (Default: true)
